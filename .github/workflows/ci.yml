@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # カタログに載せた全ライブラリが一緒に解決できることを確認する。
+      # Dependabot の更新 PR で組み合わせが壊れたらここで落ちる。
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm test

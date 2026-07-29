@@ -1,0 +1,53 @@
+version: 2
+
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+    # devDependencies がカタログの正本なので、Dependabot の PR がそのまま
+    # カタログの更新になる。
+    #
+    # groups は「揃えて更新しないと壊れるもの」だけをまとめる。
+    # 同一バージョン系列でリリースされるもの（react と react-dom、@tanstack/* など）と、
+    # peer 依存で連動するもの（xstate と @xstate/react）が対象。
+    # 単に分野が近いだけのライブラリはまとめない。個別に PR が来る方が、
+    # 壊れたときにどれが原因か分かる。
+    groups:
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+      tanstack:
+        patterns:
+          - "@tanstack/*"
+      vitest:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
+      tailwind:
+        patterns:
+          - "tailwindcss"
+          - "@tailwindcss/*"
+      xstate:
+        patterns:
+          - "xstate"
+          - "@xstate/*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    commit-message:
+      prefix: "ci"
