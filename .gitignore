@@ -1,5 +1,8 @@
 node_modules/
 
+# dependabot-merge スキルの評価結果(fixture・実行ログ)。コミットしない
+.claude/skills/dependabot-merge-workspace/
+
 # pnpm-lock.yaml はコミットする。
 # カタログの組み合わせが実際に解決できることを検証するため。
 

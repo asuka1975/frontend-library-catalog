@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Fake `gh` for skill evals.
+
+Serves pr list/view/diff/checks/merge/comment from a local fixture whose
+"origin" is a bare git repo on disk, so merges, tags and pushes are real git
+operations that never reach GitHub. Everything else (gh api, gh release, ...)
+is delegated to the real gh binary so advisory lookups and upstream release
+notes hit live data.
+
+`gh pr checks` reports "no checks" like a repo whose CI never ran — the skill
+is expected to fall back to local verification (--frozen-lockfile install).
+
+`@dependabot rebase` recreates the branch from scratch: re-apply the version
+change on top of the new main and regenerate the lockfile with the real pnpm.
+This matches what Dependabot actually does for npm repos, where a plain git
+rebase of a lockfile-touching branch practically never applies cleanly.
+
+Fixture layout, located via $FIXTURE_DIR:
+  origin.git/   bare repo acting as the remote
+  work/         scratch clone used to perform merges
+  state.json    PR metadata
+"""
+import json
+import os
+import subprocess
+import sys
+
+FIXTURE = os.environ["FIXTURE_DIR"]
+STATE = os.path.join(FIXTURE, "state.json")
+ORIGIN = os.path.join(FIXTURE, "origin.git")
+WORK = os.path.join(FIXTURE, "work")
+REAL_GH = "/usr/bin/gh"
+
+
+def load():
+    with open(STATE) as f:
+        return json.load(f)
+
+
+def save(state):
+    with open(STATE, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def git(*args, cwd=WORK, check=True):
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if check and r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        sys.exit(r.returncode)
+    return r
+
+
+def delegate():
+    os.execv(REAL_GH, [REAL_GH, *sys.argv[1:]])
+
+
+def mergeable(pr):
+    """Ask git whether this branch still merges cleanly into main."""
+    if pr["state"] != "OPEN":
+        return "UNKNOWN", "UNKNOWN"
+    git("fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*", "--prune")
+    git("checkout", "-q", "-B", "_probe", "origin/main")
+    r = git("merge", "--no-commit", "--no-ff", f"origin/{pr['headRefName']}", check=False)
+    git("merge", "--abort", check=False)
+    git("checkout", "-q", "-B", "_idle", "origin/main")
+    if r.returncode == 0:
+        return "MERGEABLE", "CLEAN"
+    return "CONFLICTING", "DIRTY"
+
+
+def pr_object(pr, fields):
+    computed = dict(pr)
+    if "mergeable" in fields or "mergeStateStatus" in fields:
+        m, s = mergeable(pr)
+        computed["mergeable"] = m
+        computed["mergeStateStatus"] = s
+    if "files" in fields:
+        d = git("diff", "--name-only", "origin/main", f"origin/{pr['headRefName']}", check=False)
+        computed["files"] = [{"path": p} for p in d.stdout.split()]
+    return {k: computed.get(k) for k in fields}
+
+
+def emit(data, jq):
+    if jq:
+        r = subprocess.run(["jq", "-r", jq], input=json.dumps(data), capture_output=True, text=True)
+        sys.stdout.write(r.stdout)
+        sys.stderr.write(r.stderr)
+        sys.exit(r.returncode)
+    print(json.dumps(data, indent=2))
+
+
+def opt(args, name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        delegate()
+
+    if args[0] == "auth":
+        print("github.com\n  ✓ Logged in to github.com account asuka1975 (keyring)")
+        return
+
+    if args[0] != "pr":
+        delegate()
+
+    state = load()
+    sub = args[1]
+    jq = opt(args, "--jq")
+    fields = (opt(args, "--json") or "number,title,url,state").split(",")
+
+    if sub == "list":
+        want = "OPEN" if "--state" not in args else opt(args, "--state").upper()
+        prs = [p for p in state["prs"] if want == "ALL" or p["state"] == want]
+        emit([pr_object(p, fields) for p in prs], jq)
+        return
+
+    num = int(args[2])
+    pr = next(p for p in state["prs"] if p["number"] == num)
+
+    if sub == "view":
+        emit(pr_object(pr, fields), jq)
+        return
+
+    if sub == "diff":
+        git("fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*", "--prune")
+        d = git("diff", "origin/main", f"origin/{pr['headRefName']}", check=False)
+        sys.stdout.write(d.stdout)
+        return
+
+    if sub == "checks":
+        # CI の無いリポジトリと同じ応答。スキルはローカル検証へフォールバックする。
+        print(f"no checks reported on the '{pr['headRefName']}' branch", file=sys.stderr)
+        sys.exit(1)
+
+    if sub == "comment":
+        body = opt(args, "--body", "")
+        pr.setdefault("comments", []).append(body)
+        if "@dependabot rebase" in body:
+            # Dependabot はブランチを作り直す: 新しい main の上でバージョン変更を
+            # 適用し直し、lockfile を再生成する。
+            git("fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*", "--prune")
+            git("checkout", "-q", "-B", pr["headRefName"], "origin/main")
+            path = os.path.join(WORK, pr["file"])
+            with open(path) as f:
+                text = f.read()
+            for old, new in pr["changes"]:
+                text = text.replace(old, new)
+            with open(path, "w") as f:
+                f.write(text)
+            subprocess.run(["pnpm", "install", "--lockfile-only"], cwd=WORK,
+                           check=True, capture_output=True, text=True)
+            git("-c", "user.name=dependabot[bot]",
+                "-c", "user.email=dependabot[bot]@users.noreply.github.com",
+                "commit", "-qam", pr["title"])
+            git("push", "-q", "--force", "origin", pr["headRefName"])
+            git("checkout", "-q", "-B", "_idle", "origin/main")
+        save(state)
+        print(f"https://github.com/asuka1975/frontend-library-catalog/pull/{num}#issuecomment-1")
+        return
+
+    if sub == "merge":
+        if pr["state"] != "OPEN":
+            print(f"pull request #{num} is already {pr['state'].lower()}", file=sys.stderr)
+            sys.exit(1)
+        git("fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*", "--prune")
+        git("checkout", "-q", "-B", "main", "origin/main")
+        r = git("merge", "--squash", f"origin/{pr['headRefName']}", check=False)
+        if r.returncode != 0:
+            git("merge", "--abort", check=False)
+            print(f"Pull request #{num} is not mergeable: the merge commit cannot be cleanly created.",
+                  file=sys.stderr)
+            sys.exit(1)
+        git("commit", "-qm", f"{pr['title']} (#{num})")
+        git("push", "-q", "origin", "main")
+        if "--delete-branch" in args:
+            git("push", "-q", "origin", "--delete", pr["headRefName"], check=False)
+        pr["state"] = "MERGED"
+        save(state)
+        print(f"✓ Squashed and merged pull request #{num} ({pr['title']})")
+        return
+
+    delegate()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,57 @@
+{
+  "skill_name": "dependabot-merge",
+  "evals": [
+    {
+      "id": 0,
+      "name": "eval-0-clean-patch-release",
+      "prompt": "Dependabotの作成したPRをセキュリティー的に問題ないかバージョンアップ先のコード修正を確認した上でレビューして、問題ない場合はマージしてください。おそらく複数のPRが作成されているはずなので、それらが一通りマージが済んだら、パッチバージョンを上げてリリースしてください。",
+      "assertions": [
+        "PR #11 (tanstack 5.101.4) がマージされている",
+        "PR #12 (zustand 5.0.14) がマージされている",
+        "package.json に両方の更新が反映されている",
+        "package.json の version が 1.0.1",
+        "タグ 1.0.1 が origin に存在する",
+        "バージョンアップのコミットログにレビュー記録が残っている",
+        "コミットログに脆弱性照合の結果が書かれている",
+        "publish が未実施であることを報告している(fixture は publish 不可)",
+        "package.json と pnpm-lock.yaml 以外を変更していない"
+      ],
+      "files": []
+    },
+    {
+      "id": 1,
+      "name": "eval-1-vulnerable-bump-held",
+      "prompt": "Dependabotの作成したPRをセキュリティー的に問題ないかバージョンアップ先のコード修正を確認した上でレビューして、問題ない場合はマージしてください。おそらく複数のPRが作成されているはずなので、それらが一通りマージが済んだら、パッチバージョンを上げてリリースしてください。",
+      "assertions": [
+        "PR #21 (prettier) がマージされている",
+        "PR #22 (minimist 1.2.5) がマージされていない",
+        "minimist が ^1.2.0 のまま main に残っている",
+        "レポートで minimist の脆弱性を指摘している",
+        "コミットログに minimist を保留した理由が残っている",
+        "コミットログに「確認できなかったこと」の見出しがある",
+        "package.json の version が 1.0.1",
+        "タグ 1.0.1 が origin に存在する",
+        "package.json と pnpm-lock.yaml 以外を変更していない"
+      ],
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "eval-2-major-bump-and-conflict",
+      "prompt": "Dependabotの作成したPRをセキュリティー的に問題ないかバージョンアップ先のコード修正を確認した上でレビューして、問題ない場合はマージしてください。おそらく複数のPRが作成されているはずなので、それらが一通りマージが済んだら、パッチバージョンを上げてリリースしてください。",
+      "assertions": [
+        "PR #31 (zod 4.4.3 メジャーアップ) がマージされていない",
+        "zod が ^3.25.76 のまま main に残っている",
+        "PR #32 (react) がマージされている",
+        "PR #33 (prettier) がマージされている",
+        "競合した PR を @dependabot rebase で解消している",
+        "競合解消で先行マージ分を巻き戻していない(react 19.2.8 と prettier 3.9.6 が両方 main にある)",
+        "コミットログにメジャーアップを保留した理由が残っている",
+        "package.json の version が 1.0.1",
+        "タグ 1.0.1 が origin に存在する",
+        "package.json と pnpm-lock.yaml 以外を変更していない"
+      ],
+      "files": []
+    }
+  ]
+}
