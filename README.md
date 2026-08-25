@@ -22,7 +22,10 @@ frontend-library-catalog/
 ├── pnpmfile.mjs          ← pnpm が読み込むフック
 ├── pnpm-workspace.yaml   ← このリポジトリ自身の設定（公開物には含めない）
 ├── scripts/, test/
-└── .github/dependabot.yml
+└── .github/
+    ├── dependabot.yml
+    ├── workflows/dependabot-review-release.yml   ← レビュー・マージ・リリース
+    └── scripts/                                  ← ワークフローから呼ぶ部品
 ```
 
 ## kotlin-library-catalog との違い
@@ -99,11 +102,68 @@ pnpm の catalog はそのままでは 1 つのワークスペース内でしか
 3. **`pnpm install` が組み合わせの検証になる。**
    カタログに載せた全ライブラリが実際に一緒に解決できるかを、このリポジトリで確認できます。
 
-## Dependabot
+## Dependabot と自動リリース
 
-`.github/dependabot.yml` を置いてあります。GitHub に push すると、毎週月曜に
-`package.json` を走査して更新 PR を作ります。`devDependencies` が正本なので、
-届いた PR をマージすればカタログの更新になります。
+更新 PR のレビューからリリースまでは
+`.github/workflows/dependabot-review-release.yml` が毎週やります。手で回したいときは
+`/dependabot-merge`（`.claude/skills/dependabot-merge/`）を使います。手順は同じで、
+レビューするモデルだけが違います（CI は codex-fugu、手元は Opus）。
+
+```
+月曜 09:00 JST  Dependabot が package.json を走査して更新 PR を作る
+      │ 15 時間
+火曜 00:00 JST  ワークフローが起きる
+      ↓
+   collect   開いている Dependabot PR を列挙する
+      ↓
+   review    PR ごとに 1 ジョブ。codex-fugu が脆弱性・上流差分・npm 上の実物を
+             調べ、MERGE / HOLD の評決を JSON で返す（トークンは読み取り専用）
+      ↓
+   apply     評決に従ってマージ / クローズ。マージ後の main で
+             pnpm install --frozen-lockfile && pnpm test を通してから
+             パッチを +1 してタグを push（レビュー内容はコミットメッセージに残る）
+      ↓
+   publish   タグの中身を npm に publish（trusted publishing）
+```
+
+ジョブを分けているのは権限のためです。レビューするモデルが読むのは上流のリリースノートや
+npm レジストリの応答、つまり **攻撃者が書ける文章** です。それを読んだエージェント自身が
+マージまでできてしまうと、このワークフローが防ごうとしている攻撃がそのまま通ります。
+だから review ジョブのトークンは読み取り専用にし、マージとタグ push は評決 JSON だけを
+受け取った apply ジョブが行い、publish ジョブには書き込み権限を持たせません。
+
+判断するのはセキュリティだけです。破壊的変更・メジャーアップ・非推奨化は HOLD の理由に
+しません（コミットログの「注意」欄に残します）。互換性の問題は利用側のビルドや型検査で
+顕在化しますが、脆弱性は黙って通ります。見ているのは後者だけです。
+
+### 用意するもの
+
+- リポジトリの secret `SAKANA_API_KEY` — レビューに使う codex-fugu の API キー
+- npm の trusted publisher 設定 — 下の「npm への publish」
+
+### 試してから任せる
+
+Actions のページから手で起動できます。`dry_run` は既定で on で、レビューと検証だけを行い、
+マージ・クローズ・リリースはしません。評決は実行の成果物（`verdict-*`）に残ります。
+
+### 自動では入らないもの
+
+- **`.github/workflows/` を書き換える PR**（GitHub Actions 自体の更新）。`GITHUB_TOKEN` には
+  `workflows` 権限が無く、マージが拒否されることがあります。その 1 件は open のまま残り、
+  他の PR とリリースは進みます。手でマージしてください。
+- **`package.json` / `pnpm-lock.yaml` / `.github/workflows/*.yml` 以外を触る PR。**
+  評決が MERGE でも取り込みません。モデルの読み間違いに委ねてよい判断ではないので、
+  ワークフローが機械的に見ています。author は Dependabot なので攻撃の兆候というより
+  前提が変わった合図です。クローズせず open のまま残します。
+- **公開直後（24 時間以内）のバージョンが必要になった回。** `pnpm-workspace.yaml` の
+  `minimumReleaseAge` は供給網対策として置いている待ち時間なので、自動では緩めません。
+  マージは済んでいるので、時間を置いて再実行すればリリースまで通ります。
+
+GitHub Actions の更新だけがマージされた回は、バージョンを上げません。公開物
+（`package.json` / `catalog.mjs` / `pnpmfile.mjs`）が変わっておらず、publish しても中身が
+同じになるためです。
+
+### groups
 
 `groups` でまとめてあるのは、揃えて更新しないと壊れるライブラリ群
 （`react` と `react-dom`、`@tanstack/*` など同一バージョン系列のもの）だけです。
@@ -124,21 +184,86 @@ pnpm catalog   # 現在のカタログを表として出力
 README にバージョンの一覧を転記していないのは、Dependabot の更新から取り残されて
 嘘になるためです。一覧が必要なときは `pnpm catalog` を使ってください。
 
-## 公開する
+## npm への publish
 
-npm レジストリに publish します。パッケージ名の scope（`@asuka1975`）は
-npm のアカウント名または organization 名と一致している必要があります。
+バージョンは `package.json` の `version` です。利用側は exact version で参照するため、
+カタログを更新したら version を上げて publish し直します。この上げ下ろしは上の
+ワークフローがやるので、通常は手を出しません。
+
+publish にトークンは使いません。npm の
+[trusted publishing](https://docs.npmjs.com/trusted-publishers#configuring-trusted-publishing)
+を使い、GitHub Actions が発行する OIDC トークンと引き換えに、その実行の間だけ有効な
+資格情報を npm から受け取ります。**漏れて困る長期の資格情報がそもそも存在しません。**
+CI に `NPM_TOKEN` を置く必要はなく、置いてもいけません。
+
+### 1. 最初の 1 回だけ手で publish する
+
+npm は **パッケージが存在しないと trusted publisher を設定できません**。
+最初のバージョンだけは手元から上げてください。
 
 ```bash
+git status --porcelain   # 空であること
+git push                 # origin/main と同じところにいること
 npm login
 pnpm publish --access public
 ```
 
-scope を変える場合は `package.json` の `name` を変更してください。
-その際も `pnpm-plugin-` の部分は残します。
+`pnpm publish` は publish 前に git を見ます。作業ツリーが汚れていると
+`ERR_PNPM_GIT_UNCLEAN`、origin と揃っていないと `ERR_PNPM_BRANCH_IS_NOT_UP_TO_DATE` で
+止まります。**`--no-git-checks` で黙らせないでください。** publish したものは
+二度と差し替えられないので、「npm 上のこのバージョンは、この commit である」が
+言えなくなると後から追えません。先にコミットして push します。
 
-バージョンは `package.json` の `version` です。利用側は exact version で参照するため、
-カタログを更新したら version を上げて publish し直します。
+パッケージ名の scope（`@asuka1975`）は npm のアカウント名または organization 名と
+一致している必要があります。scope を変える場合は `package.json` の `name` を変更します。
+その際も `pnpm-plugin-` の部分は残してください（`pnpm test` で検査しています）。
+
+### 2. trusted publisher を登録する
+
+npmjs.com のパッケージ設定 → **Trusted Publisher** → **GitHub Actions** で次を入れます。
+
+| 項目 | 値 |
+| --- | --- |
+| Organization or user | `asuka1975` |
+| Repository | `frontend-library-catalog` |
+| Workflow filename | `dependabot-review-release.yml` |
+| Environment name | 空のまま |
+| Allowed actions | `npm publish` |
+
+**Workflow filename はパスではなくファイル名だけ**です。ここに登録した名前と実際に
+publish するワークフローのファイル名が違うと 403 になります。
+`.github/workflows/dependabot-review-release.yml` をリネームするときは、npm 側も直してください。
+
+以降は、ワークフローがタグを push した回に publish まで自動で進みます。
+
+### 前提
+
+- publish ジョブに `id-token: write` が要ります（OIDC トークンの発行に必要）。
+  そのジョブには書き込み権限を渡していないので、publish 以外のことはできません
+- npm CLI 11.5.1 以上、Node 22.14 以上。ワークフローは Node 24 を使い、同梱の npm が
+  古ければ上げてから publish します
+- publish は `pnpm publish` ではなく **`npm publish`** です。npm のドキュメントが前提に
+  しているのは npm CLI で、pnpm 側の OIDC 対応はバージョンによって挙動が変わってきた
+  経緯があります（[pnpm#11513](https://github.com/pnpm/pnpm/issues/11513)）。
+  このパッケージ自身の `package.json` は `catalog:` を使っていないため、`pnpm publish` の
+  展開処理は要らず、公開物は同じものになります
+- 公開リポジトリなので、provenance（どのワークフローのどのコミットから作られたか）が
+  自動で付きます。`--provenance` は要りません
+- self-hosted ランナーからは使えません
+
+### 手元から publish するとき
+
+trusted publishing は CI からしか効きません。ワークフローの publish が失敗したまま
+追いつきたいときは、従来どおり `npm login` してから上げます。
+
+```bash
+git checkout <タグ>
+npm publish --access public
+```
+
+タグは push 済みで main のバージョンも上がっているので、**巻き戻さないでください。**
+npm に上がっていないのはその 1 バージョンだけです。実行の
+**Re-run failed jobs** でも同じところからやり直せます。
 
 ## 利用側の設定
 

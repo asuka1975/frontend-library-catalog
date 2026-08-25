@@ -1,0 +1,37 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pr", "verdict", "reason", "updates", "checked", "notes", "unverified"],
+  "properties": {
+    "pr": {
+      "type": "integer",
+      "description": "レビュー対象の PR 番号"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["MERGE", "HOLD"],
+      "description": "セキュリティ上の懸念が残るときだけ HOLD。破壊的変更やメジャーアップは HOLD の理由にしない。"
+    },
+    "reason": {
+      "type": "string",
+      "description": "判断理由。1 行。PR のクローズ理由とコミットログの表にそのまま入る。"
+    },
+    "updates": {
+      "type": "string",
+      "description": "更新内容の要約。例: @tanstack/* 5.100.0 -> 5.101.4 (4 件)"
+    },
+    "checked": {
+      "type": "string",
+      "description": "確認したことの要約。1 行。例: GHSA 0 件 / install scripts 追加なし / 上流差分 42 commits・不審な変更なし / 推移的依存の追加なし"
+    },
+    "notes": {
+      "type": "string",
+      "description": "セキュリティ以外で気づいたこと（破壊的変更 / メジャーアップ / 非推奨化 / ライセンス変更）。判断には使わないが利用側が知るべきこと。無ければ空文字列。"
+    },
+    "unverified": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "確認できなかったこと。無ければ空配列。「確認した」と書かずにここへ入れる。"
+    }
+  }
+}

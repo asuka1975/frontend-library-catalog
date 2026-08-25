@@ -1,0 +1,482 @@
+name: Dependabot review and release
+
+# Dependabot が出した更新 PR を Sakana Fugu にレビューさせ、問題なければマージ、
+# 問題があればクローズし、全部片付いたらバージョンを上げてタグを打ち、npm に publish する。
+# モデルは下の FUGU_MODEL 一箇所で決まり、PR コメントとリリースコミットの記録にも
+# そこから流れる。切り替えるときは FUGU_MODEL だけ書き換えればよい。
+#
+# 権限の配り方がこのワークフローの要点。レビューするモデルが読むのは PR 本文に
+# 埋め込まれた上流のリリースノートや npm レジストリの応答、つまり攻撃者が書ける文章で
+# ある。それを読んだエージェント自身がマージまでできると、このワークフローが防ごうと
+# している攻撃がそのまま通る。だから review ジョブのトークンは読み取り専用にし、
+# マージ・クローズ・タグ push は評決 JSON を受け取った apply ジョブの側で行う。
+# npm への publish はさらに別ジョブに分け、書き込み権限を持たせずに OIDC だけを渡す。
+#
+# publish は npm の trusted publishing（OIDC）を使う。npm 側にトークンを置かないので、
+# 漏れて困る長期の資格情報がそもそも存在しない。npm 側の登録内容は README.md の
+# 「npm への publish」を参照。**npm には「ワークフローのファイル名」を登録するため、
+# このファイルをリネームすると publish が 403 で落ちる。**
+
+on:
+  schedule:
+    # 火曜 00:00 JST。GitHub の cron は UTC 固定なので月曜 15:00 UTC と書く。
+    # Dependabot は月曜 09:00 JST に PR を作る（.github/dependabot.yml）ので、その 15 時間後。
+    - cron: "0 15 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "レビューと検証だけ行い、マージ・クローズ・リリースはしない"
+        type: boolean
+        default: true
+
+# 既定は何も許可しない。必要な権限はジョブごとに与える。
+permissions: {}
+
+concurrency:
+  group: dependabot-review-release
+  cancel-in-progress: false
+
+env:
+  # fugu-cyber は従量課金なので使わない。セキュリティ特化ではないぶん、
+  # レビュー手順は .github/scripts/review-prompt.md 側で明示的に指示している。
+  FUGU_MODEL: fugu-ultra-v1.1
+
+jobs:
+  collect:
+    name: 対象の PR を集める
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      prs: ${{ steps.list.outputs.prs }}
+      count: ${{ steps.list.outputs.count }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: 開いている Dependabot PR を列挙する
+        id: list
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh pr list --repo "$GITHUB_REPOSITORY" --author "app/dependabot" \
+            --state open --limit 50 \
+            --json number,title,url,headRefName > prs.json
+
+          count=$(jq length prs.json)
+          {
+            echo "count=$count"
+            echo "prs=$(jq -c '[.[].number]' prs.json)"
+          } >> "$GITHUB_OUTPUT"
+
+          # ここを `[ "$count" -eq 0 ] && echo ...` と書かないこと。run ブロックの
+          # 最後のコマンドになるため、PR が 1 件以上あると偽 -> 終了ステータス 1 で
+          # ステップが失敗する。
+          {
+            echo "## 対象の PR: ${count} 件"
+            echo
+            jq -r '.[] | "- [#\(.number)](\(.url)) \(.title)"' prs.json
+            if [ "$count" -eq 0 ]; then
+              echo "更新 PR はありません。バージョンも上げません。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prs
+          path: prs.json
+
+  review:
+    # ジョブ名には env コンテキストを書けないので、モデル名はステップのログに出す
+    name: "#${{ matrix.pr }} をレビュー"
+    needs: collect
+    if: needs.collect.outputs.count != '0'
+    runs-on: ubuntu-latest
+    # 読み取り専用。モデルがマージ・コメント・push を試みても失敗する。
+    permissions:
+      contents: read
+      pull-requests: read
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        pr: ${{ fromJSON(needs.collect.outputs.prs) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # チェックアウトが git config に残す資格情報も渡さない
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: codex-fugu を入れる
+        env:
+          SAKANA_API_KEY: ${{ secrets.SAKANA_API_KEY }}
+          FUGU_INSTALL_TARGET: codex
+        run: |
+          set -euo pipefail
+          npm install -g @openai/codex
+          # インストーラが ~/.codex/config.toml に Sakana のプロバイダ設定を書き、
+          # codex -p fugu を呼ぶ codex-fugu ランチャを置く。--yes で非対話。
+          curl -fsSL https://sakana.ai/fugu/install | bash -s -- --yes
+          codex-fugu --status
+
+      - name: レビューする
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SAKANA_API_KEY: ${{ secrets.SAKANA_API_KEY }}
+          PR_NUMBER: ${{ matrix.pr }}
+          CODEX_FUGU_NO_UPDATE: "1"
+        run: |
+          set -uo pipefail
+          # Actions の既定シェルは `bash -e {0}` なので、明示的に切らないと errexit が
+          # 残る。codex が落ちたときこそ後段の ERROR フォールバックまで進めたいので、
+          # ここだけは切る。ステップの成否は最後の if で自分で決める。
+          set +e
+          echo "model: ${FUGU_MODEL}"
+          mkdir -p verdicts
+
+          python3 - > prompt.txt <<'PY'
+          import os, pathlib
+          t = pathlib.Path(".github/scripts/review-prompt.md").read_text(encoding="utf-8")
+          print(t.replace("{{PR_NUMBER}}", os.environ["PR_NUMBER"])
+                 .replace("{{REPO}}", os.environ["GITHUB_REPOSITORY"]))
+          PY
+
+          # サンドボックスを開けているのは、advisory / 上流のリリースとタグ間差分 /
+          # npm レジストリ上の実物を引くのにネットワークと gh・npm が要るため。
+          # ランナーは使い捨てで、このジョブのトークンは読み取り専用なので、開けても
+          # 書き換えられるものが無い。
+          codex-fugu exec \
+            --model "$FUGU_MODEL" \
+            --sandbox danger-full-access \
+            --output-schema .github/scripts/verdict-schema.json \
+            --output-last-message raw-verdict.txt \
+            - < prompt.txt
+
+          # 評決が取れなかったときは ERROR にする。ERROR は「調べていない」であって
+          # 「問題なし」ではないので、apply ジョブはその PR に触れない。
+          python3 - "$PR_NUMBER" raw-verdict.txt "verdicts/${PR_NUMBER}.json" <<'PY'
+          import json, re, sys
+
+          pr, src, dst = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+          try:
+              text = open(src, encoding="utf-8").read()
+          except OSError:
+              text = ""
+
+          data = None
+          for candidate in (text.strip(), *(m.group(0) for m in re.finditer(r"\{.*\}", text, re.S))):
+              try:
+                  data = json.loads(candidate)
+                  break
+              except (json.JSONDecodeError, ValueError):
+                  continue
+
+          if not isinstance(data, dict) or data.get("verdict") not in ("MERGE", "HOLD"):
+              data = {
+                  "verdict": "ERROR",
+                  "reason": "評決を JSON として取り出せなかった",
+                  "updates": "",
+                  "checked": "",
+                  "notes": "",
+                  "unverified": ["レビューが完了せず、脆弱性・上流差分ともに未確認"],
+              }
+
+          # 改行やタブが残っていると、PR コメントでも Markdown の表でも崩れる。
+          # 中身の良し悪しはここでは判断せず、形だけ整える。
+          def flatten(v):
+              return " ".join(str(v).split()).strip(" 、,")
+
+          for key in ("reason", "updates", "checked", "notes"):
+              data[key] = flatten(data.get(key, ""))
+          data["unverified"] = [flatten(u) for u in (data.get("unverified") or []) if flatten(u)]
+
+          data["pr"] = pr  # モデルの申告ではなく、ジョブが知っている番号を使う
+          with open(dst, "w", encoding="utf-8") as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+          print(json.dumps(data, ensure_ascii=False, indent=2))
+          PY
+
+          {
+            echo "## #${PR_NUMBER}"
+            echo
+            echo '```json'
+            cat "verdicts/${PR_NUMBER}.json"
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # 評決が取れなかったことは緑で流さない。apply ジョブは always() で動くので、
+          # ここで落としても他の PR の処理は止まらない。
+          if [ "$(jq -r .verdict "verdicts/${PR_NUMBER}.json")" = "ERROR" ]; then
+            echo "::error::#${PR_NUMBER} の評決を取得できなかった。この PR には触らない。"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verdict-${{ matrix.pr }}
+          path: verdicts/
+
+  apply:
+    name: マージ・クローズしてタグを打つ
+    needs: [collect, review]
+    # review が 1 件失敗しても残りは片付ける。失敗した PR は評決が無いので触られない。
+    if: always() && needs.collect.result == 'success' && needs.collect.outputs.count != '0'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          # next-version.mjs がタグの重複を見るので、履歴とタグを全部持ってくる
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: pnpm を入れる
+        run: |
+          set -euo pipefail
+          # package.json の packageManager をそのまま使う。ここにバージョンを
+          # 二重に書くと、手元と CI で別の pnpm が動く。
+          spec=$(node -p "require('./package.json').packageManager.split('+')[0]")
+          npm install -g "$spec"
+          pnpm --version
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: verdict-*
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: prs
+
+      - name: 前提を確認する
+        run: |
+          set -euo pipefail
+          # 作業ツリーが汚れている / main にいない、のどちらかなら片付けようとせず止まる。
+          # マージとタグ push は取り消しが面倒なので、前提が崩れたまま進める価値はない。
+          #
+          # --untracked-files=no を付けているのは、直前の download-artifact が prs.json と
+          # artifacts/ を untracked で置くため。見たいのは追跡済みファイルが書き換わって
+          # いないかどうかで、成果物の有無ではない。
+          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+            echo "::error::作業ツリーが汚れている。マージとタグ push は行わない。"
+            git status --short
+            exit 1
+          fi
+          branch=$(git rev-parse --abbrev-ref HEAD)
+          if [ "$branch" != main ]; then
+            echo "::error::main にいない (${branch})。マージとタグ push は行わない。"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # マージ前の main。何が実際に変わったかを後で見るために覚えておく。
+          echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: 評決に従って PR を片付ける
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: bash .github/scripts/settle-prs.sh
+
+      - name: バージョンを上げてタグを打つ
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          merged=$(jq -s '[.[] | select(.outcome == "merged")] | length' results.jsonl)
+          if [ "$merged" -eq 0 ]; then
+            echo "マージできた PR が無いので、上げるものが無い。バージョンは据え置く。" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git pull --ff-only origin main
+
+          # 公開されるのは package.json / catalog.mjs / pnpmfile.mjs だけ（files 参照）。
+          # そこが変わっていなければ publish しても中身は同じなので、バージョンを
+          # 上げない。GitHub Actions の更新だけがマージされた場合がこれにあたる。
+          if git diff --quiet "$BASE_SHA" HEAD -- package.json catalog.mjs pnpmfile.mjs; then
+            echo "公開物に変化が無い（GitHub Actions の更新のみ）。バージョンは据え置く。" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # マージ後の main で、カタログ全体が今も一緒に解決できることを確認する。
+          # このリポジトリの生成物はカタログ（バージョンの組）そのものなので、これが
+          # 検証の本体。git は pnpm-lock.yaml を自動マージできてしまうことがあり、
+          # 競合が出なかったことは lockfile が正しいことを意味しない。
+          lockfile_flag=()
+          if ! pnpm install --frozen-lockfile; then
+            echo "::warning::--frozen-lockfile が失敗した。lockfile を package.json に追従させる。"
+            # バージョン選択のやり直しではなく、マージ済みの package.json に lockfile を
+            # 合わせるだけの操作。
+            pnpm install --lockfile-only
+
+            # 解決をやり直した副作用で pnpm が minimumReleaseAgeExclude を書き足したなら、
+            # 公開から 24 時間経っていないバージョンを取り込もうとしている。これは
+            # 供給網対策として意図的に置いている待ち時間なので、自動で外さない。
+            if [ -n "$(git status --porcelain -- pnpm-workspace.yaml)" ]; then
+              git checkout -- pnpm-workspace.yaml
+              echo "::error::公開直後（24 時間以内）のバージョンが必要になった。minimumReleaseAge を自動で緩めることはしない。マージは済んでいるので、時間を置いて再実行すれば通る。"
+              exit 1
+            fi
+
+            pnpm install --frozen-lockfile
+            lockfile_flag=(--lockfile-regenerated)
+          fi
+          pnpm test
+
+          # パッチ +1、X.Y.Z 形式の検査、タグの重複チェック、npm に publish 済みで
+          # ないことのチェックはこのスクリプトが行う。手で計算しないこと。
+          node .claude/skills/dependabot-merge/scripts/next-version.mjs --apply | tee version.txt
+          version=$(sed -n 's/^next=//p' version.txt)
+          tag=$(sed -n 's/^tag=//p' version.txt)
+
+          python3 .github/scripts/build-release-notes.py \
+            --results results.jsonl --version "$version" --model "$FUGU_MODEL" \
+            "${lockfile_flag[@]}" --out release-notes.txt
+
+          # pnpm-lock.yaml は作り直していなければ何も起きない
+          git add package.json pnpm-lock.yaml
+          git commit -F release-notes.txt
+          git tag "$tag"
+          git push origin main
+          git push origin "$tag"
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## リリース: ${tag}"
+            echo
+            echo "タグを push した。この実行の publish ジョブが npm に上げる。"
+            echo
+            echo '```'
+            cat release-notes.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: run-record
+          path: |
+            results.jsonl
+            release-notes.txt
+          if-no-files-found: warn
+
+  publish:
+    name: npm に publish する
+    needs: apply
+    # apply がタグを打ったときだけ動く。dry-run・マージ 0 件・公開物に変化なしの
+    # いずれでも tag は空になる。
+    if: needs.apply.outputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      # trusted publishing の OIDC トークンを発行するために要る。
+      # 書き込み権限はここには無い。publish 以外のことはできない。
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # main の先頭ではなくタグを見る。apply の後に main が動いていても、
+          # publish するのは検証してタグを打ったその中身。
+          ref: ${{ needs.apply.outputs.tag }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          # trusted publishing は Node 22.14 以上と npm 11.5.1 以上が要る
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: 前提を確認する
+        env:
+          TAG: ${{ needs.apply.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          # npm が古いと OIDC を見に行かず、トークンが無いまま 401 になる。
+          # 何が足りないのかログから分かりにくいので、先に上げてしまう。
+          have=$(npm --version)
+          if ! printf '%s\n%s\n' "11.5.1" "$have" | sort -V -C; then
+            echo "npm ${have} は trusted publishing に足りないので上げる"
+            npm install -g npm@latest
+          fi
+          echo "npm: $(npm --version) / node: $(node --version)"
+
+          # タグと package.json の version が食い違ったまま publish すると、
+          # タグの指す中身と npm 上のバージョンがずれて後から追えなくなる。
+          version=$(node -p "require('./package.json').version")
+          if [ "$version" != "$TAG" ]; then
+            echo "::error::タグ ${TAG} と package.json の version ${version} が一致しない。"
+            exit 1
+          fi
+
+      - name: テストする
+        # 依存は要らない（node:test だけ）。publish 直前にもう一度、公開物の
+        # 整合性だけ見る。
+        run: node --test test/*.test.mjs
+
+      - name: publish する
+        # トークンは渡さない。npm CLI が OIDC を検出して短命の資格情報を取る。
+        # 公開リポジトリなので provenance も自動で付く。
+        run: npm publish --access public
+
+      - name: 結果を書く
+        if: always()
+        env:
+          TAG: ${{ needs.apply.outputs.tag }}
+          RESULT: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          if [ "$RESULT" = "success" ]; then
+            {
+              echo "## publish 完了: ${TAG}"
+              echo
+              echo '```'
+              echo "pnpm add --config $(node -p "require('./package.json').name")"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## publish 失敗: ${TAG}"
+              echo
+              echo "タグ \`${TAG}\` は push 済みで、main のバージョンも上がっている。"
+              echo "npm に上がっていないのはこの 1 バージョンだけなので、巻き戻さないこと。"
+              echo
+              echo "追いつき方は 2 つ。"
+              echo
+              echo "1. この実行の **Re-run failed jobs**。マージ済みの PR は再処理されず、publish だけやり直す。"
+              echo "2. 手元から publish する。trusted publishing は CI からしか効かないので、"
+              echo "   \`npm login\` してから \`git checkout ${TAG} && npm publish --access public\`。"
+              echo
+              echo "403 で落ちている場合は、npm 側の trusted publisher 設定"
+              echo "（リポジトリ名・ワークフローのファイル名）がこのワークフローと一致しているかを見る。"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
