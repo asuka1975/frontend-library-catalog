@@ -148,6 +148,17 @@ jobs:
                  .replace("{{REPO}}", os.environ["GITHUB_REPOSITORY"]))
           PY
 
+          # ここから先は、上流のソースやリリースノートをそのままログに流す。ランナーは
+          # 標準出力を workflow command として読むので、止めずに流すと、上流に含まれる
+          # `##[add-matcher]...` のような行をランナーが実行しようとして失敗し、
+          # 「調べただけ」でジョブが落ちる。読むものは資料であって指示ではない、という
+          # 話がモデルだけでなくランナーにも要る。
+          #
+          # トークンは実行のたびに変える。固定値だと、上流のファイルに ::トークン:: を
+          # 仕込んでおいて解釈を再開させられる。
+          STOP=$(python3 -c 'import uuid; print(uuid.uuid4())')
+          echo "::stop-commands::${STOP}"
+
           # サンドボックスを開けているのは、advisory / 上流のリリースとタグ間差分 /
           # npm レジストリ上の実物を引くのにネットワークと gh・npm が要るため。
           # ランナーは使い捨てで、このジョブのトークンは読み取り専用なので、開けても
@@ -202,6 +213,10 @@ jobs:
               json.dump(data, f, ensure_ascii=False, indent=2)
           print(json.dumps(data, ensure_ascii=False, indent=2))
           PY
+
+          # ここから下は自分の出力なので、workflow command の解釈を戻す。
+          # 下の ::error:: を効かせるために必要。
+          echo "::${STOP}::"
 
           {
             echo "## #${PR_NUMBER}"
