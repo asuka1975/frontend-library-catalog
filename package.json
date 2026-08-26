@@ -1,6 +1,6 @@
 {
   "name": "@asuka1975/pnpm-plugin-frontend-library-catalog",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "React プロジェクトのライブラリバージョンを統一する pnpm カタログ",
   "license": "MIT",
   "repository": {
