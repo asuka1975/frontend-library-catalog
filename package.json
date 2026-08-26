@@ -3,6 +3,10 @@
   "version": "1.0.1",
   "description": "React プロジェクトのライブラリバージョンを統一する pnpm カタログ",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/asuka1975/frontend-library-catalog.git"
+  },
   "type": "module",
   "packageManager": "pnpm@11.5.1",
   "files": [

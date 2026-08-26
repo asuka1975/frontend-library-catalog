@@ -255,13 +255,13 @@ for pr in "${to_merge[@]}"; do
   fi
 
   log "#$pr: マージする"
-  # マージ失敗で実行ごと止めない。GITHUB_TOKEN には workflows 権限が無く、
-  # .github/workflows/ を書き換える PR（GitHub Actions の更新）は API に拒否される
-  # ことがある。その 1 件を open のまま残して、他の PR とリリースは進める。
+  # マージ失敗で実行ごと止めない。ブランチ保護、必須チェックの未達、権限など、
+  # 拒否の理由はこちらから制御できない。その 1 件を open のまま残して、他の PR と
+  # リリースは進める。
   if ! gh pr merge "$pr" --squash --delete-branch; then
     log "  マージが拒否された。open のまま残す"
     record "$(jq '.verdict = "HOLD" |
-                  .reason = "レビューは通ったがマージが拒否された（PR は open のまま。GITHUB_TOKEN は .github/workflows を書き換える PR をマージできない）"' \
+                  .reason = "レビューは通ったがマージが拒否された（PR は open のまま。実行ログを参照）"' \
                <<<"$verdict_json")" "left_open"
     continue
   fi

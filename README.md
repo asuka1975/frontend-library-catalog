@@ -146,11 +146,11 @@ npm レジストリの応答、つまり **攻撃者が書ける文章** です�
 Actions のページから手で起動できます。`dry_run` は既定で on で、レビューと検証だけを行い、
 マージ・クローズ・リリースはしません。評決は実行の成果物（`verdict-*`）に残ります。
 
+`publish_tag` に既存のタグを入れると、PR を一切見ずにそのタグを publish するだけの
+実行になります（下の「タグを指定して publish する」）。
+
 ### 自動では入らないもの
 
-- **`.github/workflows/` を書き換える PR**（GitHub Actions 自体の更新）。`GITHUB_TOKEN` には
-  `workflows` 権限が無く、マージが拒否されることがあります。その 1 件は open のまま残り、
-  他の PR とリリースは進みます。手でマージしてください。
 - **`package.json` / `pnpm-lock.yaml` / `.github/workflows/*.yml` 以外を触る PR。**
   評決が MERGE でも取り込みません。モデルの読み間違いに委ねてよい判断ではないので、
   ワークフローが機械的に見ています。author は Dependabot なので攻撃の兆候というより
@@ -162,6 +162,9 @@ Actions のページから手で起動できます。`dry_run` は既定で on �
 GitHub Actions の更新だけがマージされた回は、バージョンを上げません。公開物
 （`package.json` / `catalog.mjs` / `pnpmfile.mjs`）が変わっておらず、publish しても中身が
 同じになるためです。
+
+マージが何らかの理由で拒否された PR（ブランチ保護、必須チェックの未達など）は、
+その 1 件だけ open のまま残り、他の PR とリリースは進みます。
 
 ### groups
 
@@ -249,21 +252,47 @@ publish するワークフローのファイル名が違うと 403 になりま�
   展開処理は要らず、公開物は同じものになります
 - 公開リポジトリなので、provenance（どのワークフローのどのコミットから作られたか）が
   自動で付きます。`--provenance` は要りません
+- **その provenance の検証が `package.json` の `repository` と突き合わせます。** 空だと
+  `422 Unprocessable Entity ... "repository.url" is ""` で落ちます。認証が通った後、
+  publish の瞬間に落ちるので気づきにくく、`pnpm test` で検査しています
 - self-hosted ランナーからは使えません
+
+### タグを指定して publish する
+
+publish だけが失敗した回や、Dependabot PR に乗らない修正を出したいときは、タグを
+指定してワークフローを起動します。レビューもマージもリリースも行わず、そのタグの
+中身を npm に上げるだけです。provenance も付きます。
+
+```bash
+gh workflow run dependabot-review-release.yml -f publish_tag=1.0.2
+```
+
+Dependabot PR が 1 件も無くてもリリースできる経路が要るのは、publish 側の設定を
+直したときに実際に困ったためです（タグは打てたが、直したものを運ぶ PR がどこにも
+無い）。その場合は手でバージョンを上げてタグを打ってから、上のコマンドで publish
+します。
+
+```bash
+node .claude/skills/dependabot-merge/scripts/next-version.mjs --apply
+git commit -am "Bump version to <新バージョン>"
+git tag <新バージョン>
+git push origin main <新バージョン>
+gh workflow run dependabot-review-release.yml -f publish_tag=<新バージョン>
+```
+
+**publish に失敗しても、push 済みのタグやコミットは巻き戻さないでください。**
+npm に上がっていないのはその 1 バージョンだけです。npm は一度使ったバージョン番号を
+再利用できませんが、**届かなかった番号は欠番にして次へ進めます。**
 
 ### 手元から publish するとき
 
-trusted publishing は CI からしか効きません。ワークフローの publish が失敗したまま
-追いつきたいときは、従来どおり `npm login` してから上げます。
+trusted publishing は CI からしか効きません。手元から上げると provenance は付きません。
+それでも構わない場合だけ、従来どおり `npm login` してから上げます。
 
 ```bash
 git checkout <タグ>
 npm publish --access public
 ```
-
-タグは push 済みで main のバージョンも上がっているので、**巻き戻さないでください。**
-npm に上がっていないのはその 1 バージョンだけです。実行の
-**Re-run failed jobs** でも同じところからやり直せます。
 
 ## 利用側の設定
 

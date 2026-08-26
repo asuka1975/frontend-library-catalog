@@ -68,10 +68,6 @@ npm の更新なら package.json と pnpm-lock.yaml、GitHub Actions の更新�
 取り込まないでください。** ただしクローズはせず、open のまま理由を添えて報告します。
 author は Dependabot なので、攻撃の兆候というより前提が変わった合図です。
 
-`.github/workflows/` を触る PR は CI ではマージできません(`GITHUB_TOKEN` に `workflows`
-権限が無いため)。open のまま残っているのはそれが理由なので、レビューを通ったなら
-手でマージしてください。
-
 ## 2. 脆弱性レビューを Opus に投げる
 
 **PR ごとに 1 エージェント。独立した作業なので、全 PR 分を同じメッセージ内で

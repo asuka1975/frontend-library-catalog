@@ -32,6 +32,18 @@ test('公開物に pnpmfile.mjs と catalog.mjs が含まれる', () => {
   }
 })
 
+test('provenance の検証に通る repository が書かれている', () => {
+  // trusted publishing は公開リポジトリで provenance を自動生成し、その検証で
+  // package.json の repository が provenance のソースと一致することを要求する。
+  // 空だと publish が 422 Unprocessable Entity で落ちる。落ちるのは publish の
+  // 瞬間、つまりタグを push した後なので、その手前のここで見る。
+  assert.match(
+    manifest.repository?.url ?? '',
+    /^git\+https:\/\/github\.com\/[^/]+\/[^/]+\.git$/,
+    `repository.url が provenance の検証に通る形ではない: ${manifest.repository?.url}`
+  )
+})
+
 test('バージョンはすべて範囲指定として妥当な形をしている', () => {
   for (const [name, range] of Object.entries(defaultCatalog)) {
     assert.match(range, /^[\^~]?\d+\.\d+\.\d+/, `${name} のバージョン指定が不正: ${range}`)
