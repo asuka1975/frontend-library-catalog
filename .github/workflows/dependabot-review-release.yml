@@ -28,6 +28,10 @@ on:
         description: "レビューと検証だけ行い、マージ・クローズ・リリースはしない"
         type: boolean
         default: true
+      publish_tag:
+        description: "既存のタグを npm に publish するだけ（レビューもマージもリリースもしない）"
+        type: string
+        default: ""
 
 # 既定は何も許可しない。必要な権限はジョブごとに与える。
 permissions: {}
@@ -44,6 +48,9 @@ env:
 jobs:
   collect:
     name: 対象の PR を集める
+    # publish_tag を指定した回は PR を見ない。collect が skipped になると、
+    # それに連なる review と apply も動かず、publish だけが残る。
+    if: inputs.publish_tag == ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -407,21 +414,27 @@ jobs:
   publish:
     name: npm に publish する
     needs: apply
-    # apply がタグを打ったときだけ動く。dry-run・マージ 0 件・公開物に変化なしの
-    # いずれでも tag は空になる。
-    if: needs.apply.outputs.tag != ''
+    # 入口は 2 つ。apply がタグを打った回と、publish_tag を指定して手で起動した回。
+    # dry-run・マージ 0 件・公開物に変化なしのいずれでも apply の tag は空になる。
+    #
+    # 後者が要るのは、Dependabot PR が 1 件も無くても出さないといけないものがある
+    # ため。publish 側の設定ミスを直したときが実際にそうだった（tag 1.0.1 は打てたが
+    # provenance の検証で弾かれ、直したものを運ぶ PR がどこにも無かった）。
+    if: always() && (inputs.publish_tag != '' || needs.apply.outputs.tag != '')
     runs-on: ubuntu-latest
     permissions:
       # trusted publishing の OIDC トークンを発行するために要る。
       # 書き込み権限はここには無い。publish 以外のことはできない。
       contents: read
       id-token: write
+    env:
+      TAG: ${{ inputs.publish_tag || needs.apply.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
         with:
           # main の先頭ではなくタグを見る。apply の後に main が動いていても、
           # publish するのは検証してタグを打ったその中身。
-          ref: ${{ needs.apply.outputs.tag }}
+          ref: ${{ inputs.publish_tag || needs.apply.outputs.tag }}
           persist-credentials: false
 
       - uses: actions/setup-node@v4
@@ -431,8 +444,6 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: 前提を確認する
-        env:
-          TAG: ${{ needs.apply.outputs.tag }}
         run: |
           set -euo pipefail
 
@@ -466,7 +477,6 @@ jobs:
       - name: 結果を書く
         if: always()
         env:
-          TAG: ${{ needs.apply.outputs.tag }}
           RESULT: ${{ job.status }}
         run: |
           set -euo pipefail
