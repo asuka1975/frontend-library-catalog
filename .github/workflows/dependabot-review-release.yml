@@ -124,13 +124,39 @@ jobs:
       - name: codex-fugu を入れる
         env:
           SAKANA_API_KEY: ${{ secrets.SAKANA_API_KEY }}
-          FUGU_INSTALL_TARGET: codex
         run: |
           set -euo pipefail
-          npm install -g @openai/codex
-          # インストーラが ~/.codex/config.toml に Sakana のプロバイダ設定を書き、
-          # codex -p fugu を呼ぶ codex-fugu ランチャを置く。--yes で非対話。
-          curl -fsSL https://sakana.ai/fugu/install | bash -s -- --yes
+
+          # Fugu の設定バンドルは Codex のバージョンと完全一致でしか配置されない。
+          # 一致しないとインストーラは --yes の下で Codex を差し替えず、設定も
+          # codex-fugu ランチャも置かないまま、警告だけ出して終了コード 0 で抜ける。
+          # 最新の Codex を入れていた頃は、Fugu の固定先より新しい Codex が npm に
+          # 出た時点から、次の codex-fugu が command not found で落ちていた。
+          #
+          # 固定先を決めているのは Fugu 側なので、先に clone して configs/bundle.sh
+          # から読み、ちょうどそのバージョンを入れる。Fugu が固定先を上げれば、
+          # こちらは何もしなくても追従する。bundle.sh は source しない。取得した
+          # コードをここで実行することになるので、値を読むだけにする。
+          git clone --quiet https://github.com/SakanaAI/fugu.git "$HOME/.fugu"
+          echo "fugu: $(git -C "$HOME/.fugu" log -1 --format='%h %s')"
+          codex_version=$(sed -n 's/^BUNDLE_CODEX_VERSION="\([0-9][0-9.]*\)"$/\1/p' \
+            "$HOME/.fugu/configs/bundle.sh")
+          if ! [[ "$codex_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Fugu の configs/bundle.sh から BUNDLE_CODEX_VERSION を読めなかった（[${codex_version}]）。"
+            exit 1
+          fi
+          npm install -g "@openai/codex@${codex_version}"
+
+          # curl | bash のブートストラップは clone して scripts/install.sh を呼ぶだけ
+          # なので、clone 済みのものを直接呼ぶ。固定先を読んだのと同じツリーの
+          # インストーラが動き、配布サーバ上のブートストラップの中身にも左右されない。
+          bash "$HOME/.fugu/scripts/install.sh" --yes
+
+          # インストーラは設定を配置できなくても 0 で抜ける。成否はここで見る。
+          if ! command -v codex-fugu >/dev/null; then
+            echo "::error::codex-fugu ランチャが置かれていない。入った Codex（$(codex --version 2>/dev/null || echo 不明)）と Fugu の固定先 ${codex_version} の一致を上のログで確認すること。"
+            exit 1
+          fi
           codex-fugu --status
 
       - name: レビューする
