@@ -79,7 +79,7 @@ importers:
         version: 5.0.0(vitest@5.0.0)
       '@xstate/react':
         specifier: ^6.1.0
-        version: 6.1.0(@types/react@19.3.0)(react@19.3.0)(xstate@5.32.6)
+        version: 6.1.0(@types/react@19.3.0)(react@19.3.0)(xstate@5.33.2)
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
@@ -151,7 +151,7 @@ importers:
         version: 5.0.0(@types/node@26.5.1)(@vitest/coverage-v8@5.0.0)(@vitest/ui@5.0.0)(happy-dom@20.14.5)(jsdom@30.0.1)(msw@2.15.0(@types/node@26.5.1)(typescript@7.0.2))(vite@8.2.2(@types/node@26.5.1)(esbuild@0.28.1)(jiti@2.7.0))
       xstate:
         specifier: ^5.32.5
-        version: 5.32.6
+        version: 5.33.2
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -2493,8 +2493,8 @@ packages:
   xmlchars@2.2.0:
     resolution: {integrity: sha512-JZnDKK8B0RCDw84FNdDAIpZK+JuJw+s7Lz8nksI7SIuU3UXJJslUthsi+uWBUYOwPFwW7W7PRLRfUKpxjtjFCw==}
 
-  xstate@5.32.6:
-    resolution: {integrity: sha512-WfA8WNrh6r9osuGwVm+aIPM4jmMW2LKHV1Yv9thYpOtL4HVF/kobh95K/O8v2jDCpDmP2EoY+6uvuqHXCZ6ZLw==}
+  xstate@5.33.2:
+    resolution: {integrity: sha512-8tC7yXgeCvpT8gKEeEje6ikJJG1wpnoLiXe+HfECW8m10ubMd3QxKOwWA8KxPJVBcLwfdRoMKYxIBGYKmo37/A==}
 
   y18n@5.0.8:
     resolution: {integrity: sha512-0pfFzegeDWJHJIAmTLRP2DwHjdF5s7jo9tuztdQxAhINCdvS+3nGINqPd00AphqJR/0LhANUS6/+7SCb98YOfA==}
@@ -3486,13 +3486,13 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.1
 
-  '@xstate/react@6.1.0(@types/react@19.3.0)(react@19.3.0)(xstate@5.32.6)':
+  '@xstate/react@6.1.0(@types/react@19.3.0)(react@19.3.0)(xstate@5.33.2)':
     dependencies:
       react: 19.3.0
       use-isomorphic-layout-effect: 1.2.1(@types/react@19.3.0)(react@19.3.0)
       use-sync-external-store: 1.6.0(react@19.3.0)
     optionalDependencies:
-      xstate: 5.32.6
+      xstate: 5.33.2
     transitivePeerDependencies:
       - '@types/react'
 
@@ -4558,7 +4558,7 @@ snapshots:
 
   xmlchars@2.2.0: {}
 
-  xstate@5.32.6: {}
+  xstate@5.33.2: {}
 
   y18n@5.0.8: {}
 
