@@ -169,10 +169,18 @@ issuer・サービスアカウント・フェデレーションルールをま�
 gh api repos/asuka1975/frontend-library-catalog/actions/oidc/customization/sub --jq .sub_claim_prefix
 ```
 
+`claims`（Console では「追加のクレーム条件」）には `repository_owner` だけを入れます。
+とくに `event_name` は入れないでください。このワークフローは手動起動では
+`workflow_dispatch`、毎週の定期実行では `schedule` になるので、どの値にしてもどちらかで
+落ちます。リポジトリとブランチは `subject_prefix` で固定済みなので、`repository` や
+`ref` を足しても絞り込みは強くなりません。
+
 main 以外のブランチから手で起動した回は `sub` が一致せず、引き換えに失敗します。
 レビューは ERROR になり、PR には触りません。引き換えに失敗した回は、ERROR の理由に
 `Token exchange failed with status 401` と出ます。拒否の詳しい理由は Claude Console の
-Workload identity の認証履歴で見られます。
+Workload identity の認証履歴で見られます。`match_subject_prefix` なら `subject_prefix`、
+`match_claim_value_mismatch` なら `claims` が、トークンの中身と合っていません。履歴には
+照合したクレームの実際の値も出ます。
 
 作られた ID はリポジトリの **secrets** に入れます。資格情報ではありませんが、組織の
 構成を公開リポジトリやログに出さないためです（secrets の値はログで伏せられます）。
