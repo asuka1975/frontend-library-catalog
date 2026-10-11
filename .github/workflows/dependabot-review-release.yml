@@ -207,6 +207,7 @@ jobs:
           PR_NUMBER: ${{ matrix.pr }}
           REVIEW_OUTCOME: ${{ steps.review.outcome }}
           STRUCTURED_OUTPUT: ${{ steps.review.outputs.structured_output }}
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
         run: |
           set -euo pipefail
           mkdir -p verdicts
@@ -231,17 +232,44 @@ jobs:
 
           pr, dst = int(sys.argv[1]), sys.argv[2]
 
+          # Action は失敗の理由をログに出さない（モデルが読んだものごと伏せている）。
+          # 実行記録から API エラーの種類・HTTP ステータス・CLI のエラー文だけを拾う。
+          # 認証や課金で落ちた回に、Console を見る前から原因の見当がつく。
+          def failure_detail():
+              try:
+                  with open(os.environ.get("EXECUTION_FILE", ""), encoding="utf-8") as f:
+                      messages = json.load(f)
+              except (OSError, ValueError):
+                  return ""
+              if not isinstance(messages, list):
+                  return ""
+              messages = [m for m in messages if isinstance(m, dict)]
+              result = next((m for m in reversed(messages) if m.get("type") == "result"), {})
+              kinds = [str(m["error"]) for m in messages
+                       if m.get("type") == "assistant" and m.get("error")]
+              status = result.get("api_error_status")
+              parts = kinds[-1:] + ([f"HTTP {status}"] if status else [])
+              # API エラーのときの result は CLI が作るエラー文で、モデルの文章ではない
+              if parts and result.get("is_error") and result.get("result"):
+                  parts.append(str(result["result"]))
+              parts += [str(e) for e in result.get("errors") or []]
+              return " ".join(" / ".join(parts).split())[:300]
+
           data = None
+          detail = ""
           if os.environ.get("REVIEW_OUTCOME") == "success":
               try:
                   data = json.loads(os.environ.get("STRUCTURED_OUTPUT", ""))
               except ValueError:
                   data = None
+          else:
+              detail = failure_detail()
 
           if not isinstance(data, dict) or data.get("verdict") not in ("MERGE", "HOLD"):
               data = {
                   "verdict": "ERROR",
-                  "reason": "評決を JSON として取り出せなかった",
+                  "reason": f"レビューが完了しなかった: {detail}" if detail
+                            else "評決を JSON として取り出せなかった",
                   "updates": "",
                   "checked": "",
                   "notes": "",
