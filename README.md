@@ -155,12 +155,24 @@ issuer・サービスアカウント・フェデレーションルールをま�
 
 | 項目 | 値 |
 | --- | --- |
-| `subject_prefix` | `repo:asuka1975/frontend-library-catalog:ref:refs/heads/main`（末尾に `*` を付けない） |
+| `subject_prefix` | `repo:asuka1975@39215088/frontend-library-catalog@1315583875:ref:refs/heads/main`（末尾に `*` を付けない） |
 | `audience` | `https://api.anthropic.com` |
 | `claims` | `{"repository_owner": "asuka1975"}` |
 
+このリポジトリの OIDC トークンの `sub` は、所有者とリポジトリの数値 ID を含む
+[immutable 形式](https://docs.github.com/en/actions/reference/security/oidc)です。
+名前だけの `repo:asuka1975/frontend-library-catalog:...` では一致せず、引き換えが
+401 で落ちます。ID 入りなので、同じ名前のリポジトリを後から作られても一致しません。
+実際の接頭辞は次で確認できます。
+
+```bash
+gh api repos/asuka1975/frontend-library-catalog/actions/oidc/customization/sub --jq .sub_claim_prefix
+```
+
 main 以外のブランチから手で起動した回は `sub` が一致せず、引き換えに失敗します。
-レビューは ERROR になり、PR には触りません。
+レビューは ERROR になり、PR には触りません。引き換えに失敗した回は、ERROR の理由に
+`Token exchange failed with status 401` と出ます。拒否の詳しい理由は Claude Console の
+Workload identity の認証履歴で見られます。
 
 作られた ID はリポジトリの **secrets** に入れます。資格情報ではありませんが、組織の
 構成を公開リポジトリやログに出さないためです（secrets の値はログで伏せられます）。
