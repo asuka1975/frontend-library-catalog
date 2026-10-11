@@ -1,9 +1,9 @@
 name: Dependabot review and release
 
-# Dependabot が出した更新 PR を Sakana Fugu にレビューさせ、問題なければマージ、
+# Dependabot が出した更新 PR を Claude Code Action にレビューさせ、問題なければマージ、
 # 問題があればクローズし、全部片付いたらバージョンを上げてタグを打ち、npm に publish する。
-# モデルは下の FUGU_MODEL 一箇所で決まり、PR コメントとリリースコミットの記録にも
-# そこから流れる。切り替えるときは FUGU_MODEL だけ書き換えればよい。
+# モデルは下の REVIEW_MODEL 一箇所で決まり、PR コメントとリリースコミットの記録にも
+# そこから流れる。切り替えるときは REVIEW_MODEL だけ書き換えればよい。
 #
 # 権限の配り方がこのワークフローの要点。レビューするモデルが読むのは PR 本文に
 # 埋め込まれた上流のリリースノートや npm レジストリの応答、つまり攻撃者が書ける文章で
@@ -16,6 +16,12 @@ name: Dependabot review and release
 # 漏れて困る長期の資格情報がそもそも存在しない。npm 側の登録内容は README.md の
 # 「npm への publish」を参照。**npm には「ワークフローのファイル名」を登録するため、
 # このファイルをリネームすると publish が 403 で落ちる。**
+#
+# Claude API への認証も ID フェデレーション（OIDC）で、API キーは置かない。そのため
+# review ジョブも id-token: write を持つ。npm はワークフローのファイル名しか見ないと
+# review ジョブの OIDC トークンでも publish できてしまうので、publish ジョブだけを
+# environment `npm` に入れ、npm 側にもその environment 名を登録する。**npm 側の
+# environment 名を外すと、上流の文章を読む review ジョブから publish できる状態に戻る。**
 
 on:
   schedule:
@@ -41,9 +47,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # fugu-cyber は従量課金なので使わない。セキュリティ特化ではないぶん、
-  # レビュー手順は .github/scripts/review-prompt.md 側で明示的に指示している。
-  FUGU_MODEL: fugu-ultra-v1.1
+  # Claude Code Action に渡すモデル ID（Opus 5.5）。Claude API の従量課金で、使用量は
+  # フェデレーションの先にあるサービスアカウントのワークスペースに付く。
+  # セキュリティ特化のモデルではないぶん、レビュー手順は
+  # .github/scripts/review-prompt.md 側で明示的に指示している。
+  REVIEW_MODEL: claude-opus-5-5
 
 jobs:
   collect:
@@ -106,6 +114,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      # Claude API の ID フェデレーション用。GitHub への権限は増えない（下で
+      # github_token を明示的に渡している）。npm は environment `npm` の
+      # トークンしか受け付けないので、このジョブからは publish できない。
+      id-token: write
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -117,62 +129,13 @@ jobs:
           # チェックアウトが git config に残す資格情報も渡さない
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: codex-fugu を入れる
+      - name: プロンプトとスキーマを用意する
+        id: prompt
         env:
-          SAKANA_API_KEY: ${{ secrets.SAKANA_API_KEY }}
+          PR_NUMBER: ${{ matrix.pr }}
         run: |
           set -euo pipefail
-
-          # Fugu の設定バンドルは Codex のバージョンと完全一致でしか配置されない。
-          # 一致しないとインストーラは --yes の下で Codex を差し替えず、設定も
-          # codex-fugu ランチャも置かないまま、警告だけ出して終了コード 0 で抜ける。
-          # 最新の Codex を入れていた頃は、Fugu の固定先より新しい Codex が npm に
-          # 出た時点から、次の codex-fugu が command not found で落ちていた。
-          #
-          # 固定先を決めているのは Fugu 側なので、先に clone して configs/bundle.sh
-          # から読み、ちょうどそのバージョンを入れる。Fugu が固定先を上げれば、
-          # こちらは何もしなくても追従する。bundle.sh は source しない。取得した
-          # コードをここで実行することになるので、値を読むだけにする。
-          git clone --quiet https://github.com/SakanaAI/fugu.git "$HOME/.fugu"
-          echo "fugu: $(git -C "$HOME/.fugu" log -1 --format='%h %s')"
-          codex_version=$(sed -n 's/^BUNDLE_CODEX_VERSION="\([0-9][0-9.]*\)"$/\1/p' \
-            "$HOME/.fugu/configs/bundle.sh")
-          if ! [[ "$codex_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Fugu の configs/bundle.sh から BUNDLE_CODEX_VERSION を読めなかった（[${codex_version}]）。"
-            exit 1
-          fi
-          npm install -g "@openai/codex@${codex_version}"
-
-          # curl | bash のブートストラップは clone して scripts/install.sh を呼ぶだけ
-          # なので、clone 済みのものを直接呼ぶ。固定先を読んだのと同じツリーの
-          # インストーラが動き、配布サーバ上のブートストラップの中身にも左右されない。
-          bash "$HOME/.fugu/scripts/install.sh" --yes
-
-          # インストーラは設定を配置できなくても 0 で抜ける。成否はここで見る。
-          if ! command -v codex-fugu >/dev/null; then
-            echo "::error::codex-fugu ランチャが置かれていない。入った Codex（$(codex --version 2>/dev/null || echo 不明)）と Fugu の固定先 ${codex_version} の一致を上のログで確認すること。"
-            exit 1
-          fi
-          codex-fugu --status
-
-      - name: レビューする
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SAKANA_API_KEY: ${{ secrets.SAKANA_API_KEY }}
-          PR_NUMBER: ${{ matrix.pr }}
-          CODEX_FUGU_NO_UPDATE: "1"
-        run: |
-          set -uo pipefail
-          # Actions の既定シェルは `bash -e {0}` なので、明示的に切らないと errexit が
-          # 残る。codex が落ちたときこそ後段の ERROR フォールバックまで進めたいので、
-          # ここだけは切る。ステップの成否は最後の if で自分で決める。
-          set +e
-          echo "model: ${FUGU_MODEL}"
-          mkdir -p verdicts
+          echo "model: ${REVIEW_MODEL}"
 
           python3 - > prompt.txt <<'PY'
           import os, pathlib
@@ -181,7 +144,74 @@ jobs:
                  .replace("{{REPO}}", os.environ["GITHUB_REPOSITORY"]))
           PY
 
-          # ここから先は、上流のソースやリリースノートをそのままログに流す。ランナーは
+          # スキーマは claude_args の中で ' に包んで渡す。中に ' が混ざると引数の
+          # 切れ目がずれ、残りが別の引数として読まれる。
+          schema=$(jq -c . .github/scripts/verdict-schema.json)
+          if [[ "$schema" == *"'"* ]]; then
+            echo "::error::verdict-schema.json に ' が含まれていて、claude_args に渡せない。"
+            exit 1
+          fi
+
+          # 複数行の出力の区切りは実行のたびに変える。プロンプトの中身と衝突させない。
+          eof=$(python3 -c 'import uuid; print(uuid.uuid4())')
+          {
+            echo "schema=${schema}"
+            echo "text<<${eof}"
+            cat prompt.txt
+            echo "${eof}"
+          } >> "$GITHUB_OUTPUT"
+
+      # 権限の要点は 4 つ。
+      #
+      # github_token を必ず渡す。省くと Action は OIDC で Claude GitHub App のトークンを
+      # 取りに行き、それは contents / pull-requests / issues の書き込み権限を持つ。この
+      # ジョブの読み取り専用トークンを渡して、上の permissions をそのまま効かせる。
+      #
+      # Claude API へは ID フェデレーションで入る。GitHub の OIDC トークンを、
+      # フェデレーションルールの寿命（token_lifetime_seconds）だけ有効なアクセス
+      # トークンに引き換えるので、漏れて困る長期の API キーが無い。ID は資格情報では
+      # ないが、組織の構成をログや公開リポジトリに出さないよう secrets に置く。
+      # anthropic_api_key は渡さないこと。静的なキーがあるとそちらが優先され、
+      # フェデレーションは黙って使われなくなる。
+      #
+      # --allowedTools で、モデルが動かせるコマンドを読み取り系の gh と npm view に絞る。
+      # advisory / 上流のリリースとタグ間差分 / npm レジストリ上の実物を引くにはこれで
+      # 足りる。許可していないコマンドは確認なしで拒否される。
+      #
+      # --setting-sources user で、チェックアウトした .claude/ を読ませない。そこにある
+      # 手元用の dependabot-merge スキルはマージとリリースまで進める手順で、このレビューの
+      # 依頼にほぼそのまま当てはまってしまう。レビュー担当に見せるのはプロンプトだけにする。
+      #
+      # Action のログに出るのは開始と結果の要約だけで、モデルが読んだ上流の文章は流れない。
+      # show_full_output を有効にするか、デバッグログ付きで再実行したときだけ流れる。
+      - name: レビューする
+        id: review
+        uses: anthropics/claude-code-action@v1
+        with:
+          github_token: ${{ github.token }}
+          anthropic_federation_rule_id: ${{ secrets.ANTHROPIC_FEDERATION_RULE_ID }}
+          anthropic_organization_id: ${{ secrets.ANTHROPIC_ORGANIZATION_ID }}
+          anthropic_service_account_id: ${{ secrets.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          anthropic_workspace_id: ${{ secrets.ANTHROPIC_WORKSPACE_ID }}
+          prompt: ${{ steps.prompt.outputs.text }}
+          claude_args: |
+            --model ${{ env.REVIEW_MODEL }}
+            --json-schema '${{ steps.prompt.outputs.schema }}'
+            --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh api:*),Bash(gh release view:*),Bash(npm view:*),WebFetch"
+            --setting-sources user
+
+      - name: 評決を取り出す
+        # レビューが落ちた回も ERROR の評決を書いて成果物に残す
+        if: ${{ !cancelled() }}
+        env:
+          PR_NUMBER: ${{ matrix.pr }}
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
+          STRUCTURED_OUTPUT: ${{ steps.review.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          mkdir -p verdicts
+
+          # 評決はモデルが書いた文字列で、上流の文章をなぞっていることがある。ランナーは
           # 標準出力を workflow command として読むので、止めずに流すと、上流に含まれる
           # `##[add-matcher]...` のような行をランナーが実行しようとして失敗し、
           # 「調べただけ」でジョブが落ちる。読むものは資料であって指示ではない、という
@@ -192,35 +222,21 @@ jobs:
           STOP=$(python3 -c 'import uuid; print(uuid.uuid4())')
           echo "::stop-commands::${STOP}"
 
-          # サンドボックスを開けているのは、advisory / 上流のリリースとタグ間差分 /
-          # npm レジストリ上の実物を引くのにネットワークと gh・npm が要るため。
-          # ランナーは使い捨てで、このジョブのトークンは読み取り専用なので、開けても
-          # 書き換えられるものが無い。
-          codex-fugu exec \
-            --model "$FUGU_MODEL" \
-            --sandbox danger-full-access \
-            --output-schema .github/scripts/verdict-schema.json \
-            --output-last-message raw-verdict.txt \
-            - < prompt.txt
-
           # 評決が取れなかったときは ERROR にする。ERROR は「調べていない」であって
-          # 「問題なし」ではないので、apply ジョブはその PR に触れない。
-          python3 - "$PR_NUMBER" raw-verdict.txt "verdicts/${PR_NUMBER}.json" <<'PY'
-          import json, re, sys
+          # 「問題なし」ではないので、apply ジョブはその PR に触れない。構造化出力が
+          # 取れなかった回は Action 自体が失敗するので、成否はステップの outcome で見て、
+          # 失敗した回の出力は使わない。
+          python3 - "$PR_NUMBER" "verdicts/${PR_NUMBER}.json" <<'PY'
+          import json, os, sys
 
-          pr, src, dst = int(sys.argv[1]), sys.argv[2], sys.argv[3]
-          try:
-              text = open(src, encoding="utf-8").read()
-          except OSError:
-              text = ""
+          pr, dst = int(sys.argv[1]), sys.argv[2]
 
           data = None
-          for candidate in (text.strip(), *(m.group(0) for m in re.finditer(r"\{.*\}", text, re.S))):
+          if os.environ.get("REVIEW_OUTCOME") == "success":
               try:
-                  data = json.loads(candidate)
-                  break
-              except (json.JSONDecodeError, ValueError):
-                  continue
+                  data = json.loads(os.environ.get("STRUCTURED_OUTPUT", ""))
+              except ValueError:
+                  data = None
 
           if not isinstance(data, dict) or data.get("verdict") not in ("MERGE", "HOLD"):
               data = {
@@ -403,7 +419,7 @@ jobs:
           tag=$(sed -n 's/^tag=//p' version.txt)
 
           python3 .github/scripts/build-release-notes.py \
-            --results results.jsonl --version "$version" --model "$FUGU_MODEL" \
+            --results results.jsonl --version "$version" --model "$REVIEW_MODEL" \
             "${lockfile_flag[@]}" --out release-notes.txt
 
           # pnpm-lock.yaml は作り直していなければ何も起きない
@@ -448,6 +464,10 @@ jobs:
     # provenance の検証で弾かれ、直したものを運ぶ PR がどこにも無かった）。
     if: always() && (inputs.publish_tag != '' || needs.apply.outputs.tag != '')
     runs-on: ubuntu-latest
+    # npm の trusted publisher にはこの environment 名を登録してある。review ジョブも
+    # id-token: write を持つので、npm が受け付けるトークンをこのジョブのものだけに絞る
+    # 境界はここ。名前を変えるなら npm 側も同時に変えないと 403 で落ちる。
+    environment: npm
     permissions:
       # trusted publishing の OIDC トークンを発行するために要る。
       # 書き込み権限はここには無い。publish 以外のことはできない。
@@ -528,6 +548,6 @@ jobs:
               echo "   \`npm login\` してから \`git checkout ${TAG} && npm publish --access public\`。"
               echo
               echo "403 で落ちている場合は、npm 側の trusted publisher 設定"
-              echo "（リポジトリ名・ワークフローのファイル名）がこのワークフローと一致しているかを見る。"
+              echo "（リポジトリ名・ワークフローのファイル名・environment 名）がこのワークフローと一致しているかを見る。"
             } >> "$GITHUB_STEP_SUMMARY"
           fi

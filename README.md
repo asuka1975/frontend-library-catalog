@@ -107,7 +107,7 @@ pnpm の catalog はそのままでは 1 つのワークスペース内でしか
 更新 PR のレビューからリリースまでは
 `.github/workflows/dependabot-review-release.yml` が毎週やります。手で回したいときは
 `/dependabot-merge`（`.claude/skills/dependabot-merge/`）を使います。手順は同じで、
-レビューするモデルだけが違います（CI は codex-fugu、手元は Opus）。
+どちらも Opus がレビューします（CI は Claude Code Action、手元は Opus のサブエージェント）。
 
 ```
 月曜 09:00 JST  Dependabot が package.json を走査して更新 PR を作る
@@ -116,8 +116,9 @@ pnpm の catalog はそのままでは 1 つのワークスペース内でしか
       ↓
    collect   開いている Dependabot PR を列挙する
       ↓
-   review    PR ごとに 1 ジョブ。codex-fugu が脆弱性・上流差分・npm 上の実物を
-             調べ、MERGE / HOLD の評決を JSON で返す（トークンは読み取り専用）
+   review    PR ごとに 1 ジョブ。Claude Code Action（Opus 5.5）が脆弱性・上流差分・
+             npm 上の実物を調べ、MERGE / HOLD の評決を JSON で返す
+             （トークンは読み取り専用）
       ↓
    apply     評決に従ってマージ / クローズ。マージ後の main で
              pnpm install --frozen-lockfile && pnpm test を通してから
@@ -138,8 +139,44 @@ npm レジストリの応答、つまり **攻撃者が書ける文章** です�
 
 ### 用意するもの
 
-- リポジトリの secret `SAKANA_API_KEY` — レビューに使う codex-fugu の API キー
+- Claude API の ID フェデレーション — 下の「Claude API の認証」
 - npm の trusted publisher 設定 — 下の「npm への publish」
+
+### Claude API の認証
+
+API キーは置きません。GitHub Actions の OIDC トークンを、Claude Console で決めた
+寿命だけ有効なアクセストークンに引き換えます
+（[Workload Identity Federation](https://platform.claude.com/docs/en/manage-claude/wif-providers/github-actions)）。
+課金は Claude API の従量課金のままです。
+
+Claude Console の **Settings → Workload identity → Connect workload → GitHub Actions** で、
+issuer・サービスアカウント・フェデレーションルールをまとめて作ります。ルールの match は
+次のとおりです。
+
+| 項目 | 値 |
+| --- | --- |
+| `subject_prefix` | `repo:asuka1975/frontend-library-catalog:ref:refs/heads/main`（末尾に `*` を付けない） |
+| `audience` | `https://api.anthropic.com` |
+| `claims` | `{"repository_owner": "asuka1975"}` |
+
+main 以外のブランチから手で起動した回は `sub` が一致せず、引き換えに失敗します。
+レビューは ERROR になり、PR には触りません。
+
+作られた ID はリポジトリの **secrets** に入れます。資格情報ではありませんが、組織の
+構成を公開リポジトリやログに出さないためです（secrets の値はログで伏せられます）。
+
+| secret | 値 |
+| --- | --- |
+| `ANTHROPIC_FEDERATION_RULE_ID` | `fdrl_...` |
+| `ANTHROPIC_ORGANIZATION_ID` | 組織の UUID（Settings → Organization） |
+| `ANTHROPIC_SERVICE_ACCOUNT_ID` | `svac_...` |
+| `ANTHROPIC_WORKSPACE_ID` | `wrkspc_...`（ルールのワークスペースが 1 つなら空でよい） |
+
+secret `ANTHROPIC_API_KEY` は作らないでください。静的なキーがあるとそちらが優先され、
+フェデレーションは黙って使われなくなります。
+
+フェデレーションのために review ジョブも `id-token: write` を持ちます。npm 側の
+environment 名（下の表）は、この review ジョブから npm に publish させないためのものです。
 
 ### 試してから任せる
 
@@ -230,19 +267,25 @@ npmjs.com のパッケージ設定 → **Trusted Publisher** → **GitHub Action
 | Organization or user | `asuka1975` |
 | Repository | `frontend-library-catalog` |
 | Workflow filename | `dependabot-review-release.yml` |
-| Environment name | 空のまま |
+| Environment name | `npm` |
 | Allowed actions | `npm publish` |
 
 **Workflow filename はパスではなくファイル名だけ**です。ここに登録した名前と実際に
 publish するワークフローのファイル名が違うと 403 になります。
 `.github/workflows/dependabot-review-release.yml` をリネームするときは、npm 側も直してください。
 
+**Environment name は空にしないでください。** 同じワークフローの review ジョブも
+Claude API の認証のために OIDC トークンを発行できます。ファイル名だけで照合すると、
+上流のリリースノートを読む review ジョブのトークンでも publish できてしまいます。
+`npm` environment に入っているのは publish ジョブだけです。
+
 以降は、ワークフローがタグを push した回に publish まで自動で進みます。
 
 ### 前提
 
-- publish ジョブに `id-token: write` が要ります（OIDC トークンの発行に必要）。
-  そのジョブには書き込み権限を渡していないので、publish 以外のことはできません
+- publish ジョブに `id-token: write` と `environment: npm` が要ります（OIDC トークンの
+  発行と、npm 側の environment 名との照合に必要）。そのジョブには書き込み権限を
+  渡していないので、publish 以外のことはできません
 - npm CLI 11.5.1 以上、Node 22.14 以上。ワークフローは Node 24 を使い、同梱の npm が
   古ければ上げてから publish します
 - publish は `pnpm publish` ではなく **`npm publish`** です。npm のドキュメントが前提に

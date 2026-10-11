@@ -44,7 +44,7 @@ def main():
     ap.add_argument("--out", required=True)
     # どのモデルが判断したかは記録の一部。後からモデルを変えたとき、過去のコミットが
     # 何にレビューされたのか分からなくなるので、実際に使った名前をそのまま残す。
-    ap.add_argument("--model", default=os.environ.get("FUGU_MODEL", "Fugu"))
+    ap.add_argument("--model", default=os.environ.get("REVIEW_MODEL", "Claude"))
     # git が pnpm-lock.yaml を自動マージした結果が package.json と食い違い、
     # lockfile を作り直した場合に立てる。何を触ったかは本文に残す。
     ap.add_argument("--lockfile-regenerated", action="store_true")
@@ -103,7 +103,7 @@ def main():
         "\n".join(unverified) if unverified else "なし",
         *lockfile_note,
         "",
-        f"レビューは codex-fugu ({args.model}) が PR ごとに実行しました。",
+        f"レビューは Claude Code ({args.model}) が PR ごとに実行しました。",
         f"タグ {args.version} を push した実行が、同じ内容を npm に publish します。",
         "",
     ])

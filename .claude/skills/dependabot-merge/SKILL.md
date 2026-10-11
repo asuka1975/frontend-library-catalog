@@ -11,8 +11,8 @@ Dependabot の PR はほぼ全て、package.json の数行と pnpm-lock.yaml(自
 上流リポジトリと npm レジストリにあります。**
 
 同じことを `.github/workflows/dependabot-review-release.yml` が毎週やります（レビューは
-codex-fugu）。このスキルは、待たずに回したいときと、CI が open のまま残した PR を
-片付けるときに使います。**判断基準は CI と揃えてあります。**
+Claude Code Action の Opus 5.5）。このスキルは、待たずに回したいときと、CI が open の
+まま残した PR を片付けるときに使います。**判断基準は CI と揃えてあります。**
 
 役割分担がこのスキルの要点です。
 

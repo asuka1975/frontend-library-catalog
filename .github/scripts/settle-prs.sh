@@ -16,7 +16,7 @@
 #   PRS_JSON     gh pr list の出力                                  既定: prs.json
 #   RESULTS      結果の書き出し先 (JSON Lines)                      既定: results.jsonl
 #   DRY_RUN      true ならマージもクローズもせず記録だけ            既定: false
-#   FUGU_MODEL   クローズ理由のコメントに書くモデル名               既定: Fugu
+#   REVIEW_MODEL クローズ理由のコメントに書くモデル名               既定: Claude
 #   GH_TOKEN     pull-requests:write / contents:write のトークン
 
 set -euo pipefail
@@ -25,7 +25,7 @@ VERDICT_DIR=${VERDICT_DIR:-artifacts}
 PRS_JSON=${PRS_JSON:-prs.json}
 RESULTS=${RESULTS:-results.jsonl}
 DRY_RUN=${DRY_RUN:-false}
-MODEL=${FUGU_MODEL:-Fugu}
+MODEL=${REVIEW_MODEL:-Claude}
 
 # Dependabot の rebase 待ち。SKILL.md と同じく 10 分で諦める。
 POLL_INTERVAL=${POLL_INTERVAL:-30}
