@@ -107,7 +107,7 @@ pnpm の catalog はそのままでは 1 つのワークスペース内でしか
 更新 PR のレビューからリリースまでは
 `.github/workflows/dependabot-review-release.yml` が毎週やります。手で回したいときは
 `/dependabot-merge`（`.claude/skills/dependabot-merge/`）を使います。手順は同じで、
-どちらも Opus がレビューします（CI は Claude Code Action、手元は Opus のサブエージェント）。
+どちらも Opus がレビューします（CI は Claude Code の CLI、手元は Opus のサブエージェント）。
 
 ```
 月曜 09:00 JST  Dependabot が package.json を走査して更新 PR を作る
@@ -116,7 +116,7 @@ pnpm の catalog はそのままでは 1 つのワークスペース内でしか
       ↓
    collect   開いている Dependabot PR を列挙する
       ↓
-   review    PR ごとに 1 ジョブ。Claude Code Action（Opus 5.5）が脆弱性・上流差分・
+   review    PR ごとに 1 ジョブ。Claude Code（Opus 5.5）が脆弱性・上流差分・
              npm 上の実物を調べ、MERGE / HOLD の評決を JSON で返す
              （トークンは読み取り専用）
       ↓

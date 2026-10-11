@@ -1,9 +1,16 @@
 name: Dependabot review and release
 
-# Dependabot が出した更新 PR を Claude Code Action にレビューさせ、問題なければマージ、
+# Dependabot が出した更新 PR を Claude Code にレビューさせ、問題なければマージ、
 # 問題があればクローズし、全部片付いたらバージョンを上げてタグを打ち、npm に publish する。
 # モデルは下の REVIEW_MODEL 一箇所で決まり、PR コメントとリリースコミットの記録にも
 # そこから流れる。切り替えるときは REVIEW_MODEL だけ書き換えればよい。
+#
+# Claude Code は anthropics/claude-code-action を通さず、CLI を直接動かしている。
+# アクション経由の呼び出しだけが、残高があっても "Credit balance is too low" で
+# 拒否されるため（anthropics/claude-code-action#1888、v1.0.248 で再現）。同じ資格情報で
+# CLI を直接動かす分には通る。直ったらアクションに戻してよい。そのときは review
+# ジョブの「レビューする」に並べた注意点（読み取り専用トークン、OIDC の要求用変数を
+# 渡さない、--setting-sources user）をアクションの入力で満たすこと。
 #
 # 権限の配り方がこのワークフローの要点。レビューするモデルが読むのは PR 本文に
 # 埋め込まれた上流のリリースノートや npm レジストリの応答、つまり攻撃者が書ける文章で
@@ -47,11 +54,13 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Claude Code Action に渡すモデル ID（Opus 5.5）。Claude API の従量課金で、使用量は
+  # Claude Code に渡すモデル ID（Opus 5.5）。Claude API の従量課金で、使用量は
   # フェデレーションの先にあるサービスアカウントのワークスペースに付く。
   # セキュリティ特化のモデルではないぶん、レビュー手順は
   # .github/scripts/review-prompt.md 側で明示的に指示している。
   REVIEW_MODEL: claude-opus-5-5
+  # Claude Code CLI のバージョン。Dependabot は追わないので手で上げる。
+  CLAUDE_CODE_VERSION: 2.1.296
 
 jobs:
   collect:
@@ -114,9 +123,9 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-      # Claude API の ID フェデレーション用。GitHub への権限は増えない（下で
-      # github_token を明示的に渡している）。npm は environment `npm` の
-      # トークンしか受け付けないので、このジョブからは publish できない。
+      # Claude API の ID フェデレーション用。GitHub への権限は増えない。npm は
+      # environment `npm` のトークンしか受け付けないので、このジョブからは
+      # publish できない。
       id-token: write
     strategy:
       fail-fast: false
@@ -129,85 +138,146 @@ jobs:
           # チェックアウトが git config に残す資格情報も渡さない
           persist-credentials: false
 
-      - name: プロンプトとスキーマを用意する
-        id: prompt
+      - name: プロンプトを用意する
         env:
           PR_NUMBER: ${{ matrix.pr }}
         run: |
           set -euo pipefail
-          echo "model: ${REVIEW_MODEL}"
+          echo "model: ${REVIEW_MODEL} / Claude Code ${CLAUDE_CODE_VERSION}"
 
-          python3 - > prompt.txt <<'PY'
+          # チェックアウトの外に置く。作業ツリーにはリポジトリの中身だけを置いておく。
+          mkdir -p "$RUNNER_TEMP/review"
+          python3 - > "$RUNNER_TEMP/review/prompt.txt" <<'PY'
           import os, pathlib
           t = pathlib.Path(".github/scripts/review-prompt.md").read_text(encoding="utf-8")
           print(t.replace("{{PR_NUMBER}}", os.environ["PR_NUMBER"])
                  .replace("{{REPO}}", os.environ["GITHUB_REPOSITORY"]))
           PY
 
-          # スキーマは claude_args の中で ' に包んで渡す。中に ' が混ざると引数の
-          # 切れ目がずれ、残りが別の引数として読まれる。
-          schema=$(jq -c . .github/scripts/verdict-schema.json)
-          if [[ "$schema" == *"'"* ]]; then
-            echo "::error::verdict-schema.json に ' が含まれていて、claude_args に渡せない。"
+      - name: Claude Code を入れる
+        run: |
+          set -euo pipefail
+          # アクションと同じ入れ方。バージョンは固定し、実行中の自動更新も止める
+          # （次のステップの DISABLE_AUTOUPDATER）。
+          for attempt in 1 2 3; do
+            timeout --foreground --kill-after=10 120 \
+              bash -c 'set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_CODE_VERSION"' \
+              && break
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Claude Code ${CLAUDE_CODE_VERSION} を入れられなかった。"
+              exit 1
+            fi
+            sleep 5
+          done
+          installed=$("$HOME/.local/bin/claude" --version | awk '{print $1}')
+          if [ "$installed" != "$CLAUDE_CODE_VERSION" ]; then
+            echo "::error::入ったのは Claude Code ${installed} で、指定の ${CLAUDE_CODE_VERSION} ではない。"
             exit 1
           fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-          # 複数行の出力の区切りは実行のたびに変える。プロンプトの中身と衝突させない。
-          eof=$(python3 -c 'import uuid; print(uuid.uuid4())')
-          {
-            echo "schema=${schema}"
-            echo "text<<${eof}"
-            cat prompt.txt
-            echo "${eof}"
-          } >> "$GITHUB_OUTPUT"
-
-      # 権限の要点は 4 つ。
+      # 権限の要点は 5 つ。
       #
-      # github_token を必ず渡す。省くと Action は OIDC で Claude GitHub App のトークンを
-      # 取りに行き、それは contents / pull-requests / issues の書き込み権限を持つ。この
-      # ジョブの読み取り専用トークンを渡して、上の permissions をそのまま効かせる。
+      # GitHub へは、このジョブの読み取り専用トークン（GH_TOKEN）だけを渡す。上の
+      # permissions がそのまま効き、モデルがマージ・コメント・push を試みても失敗する。
       #
       # Claude API へは ID フェデレーションで入る。GitHub の OIDC トークンを、
       # フェデレーションルールの寿命（token_lifetime_seconds）だけ有効なアクセス
       # トークンに引き換えるので、漏れて困る長期の API キーが無い。ID は資格情報では
       # ないが、組織の構成をログや公開リポジトリに出さないよう secrets に置く。
-      # anthropic_api_key は渡さないこと。静的なキーがあるとそちらが優先され、
+      # ANTHROPIC_API_KEY は渡さないこと。静的なキーがあるとそちらが優先され、
       # フェデレーションは黙って使われなくなる。
+      #
+      # OIDC トークンの要求用変数（ACTIONS_ID_TOKEN_REQUEST_*）は Claude Code に渡さない。
+      # 渡すと、上流の文章に誘導されたモデルが、このジョブの名前で OIDC トークンを
+      # 取れてしまう。トークンを取るのはこのシェルだけで、Claude Code はファイルを読む。
       #
       # --allowedTools で、モデルが動かせるコマンドを読み取り系の gh と npm view に絞る。
       # advisory / 上流のリリースとタグ間差分 / npm レジストリ上の実物を引くにはこれで
-      # 足りる。許可していないコマンドは確認なしで拒否される。
+      # 足りる。-p では確認を出せないので、許可していないコマンドは拒否される。
       #
       # --setting-sources user で、チェックアウトした .claude/ を読ませない。そこにある
       # 手元用の dependabot-merge スキルはマージとリリースまで進める手順で、このレビューの
       # 依頼にほぼそのまま当てはまってしまう。レビュー担当に見せるのはプロンプトだけにする。
       #
-      # Action のログに出るのは開始と結果の要約だけで、モデルが読んだ上流の文章は流れない。
-      # show_full_output を有効にするか、デバッグログ付きで再実行したときだけ流れる。
+      # Claude Code の出力はファイルに書き、ログには結果の要約だけを出す。モデルが読んだ
+      # 上流の文章はログに流さない。
       - name: レビューする
-        id: review
-        uses: anthropics/claude-code-action@v1
-        with:
-          github_token: ${{ github.token }}
-          anthropic_federation_rule_id: ${{ secrets.ANTHROPIC_FEDERATION_RULE_ID }}
-          anthropic_organization_id: ${{ secrets.ANTHROPIC_ORGANIZATION_ID }}
-          anthropic_service_account_id: ${{ secrets.ANTHROPIC_SERVICE_ACCOUNT_ID }}
-          anthropic_workspace_id: ${{ secrets.ANTHROPIC_WORKSPACE_ID }}
-          prompt: ${{ steps.prompt.outputs.text }}
-          claude_args: |
-            --model ${{ env.REVIEW_MODEL }}
-            --json-schema '${{ steps.prompt.outputs.schema }}'
-            --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh api:*),Bash(gh release view:*),Bash(npm view:*),WebFetch"
-            --setting-sources user
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ secrets.ANTHROPIC_FEDERATION_RULE_ID }}
+          ANTHROPIC_ORGANIZATION_ID: ${{ secrets.ANTHROPIC_ORGANIZATION_ID }}
+          ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ secrets.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          ANTHROPIC_WORKSPACE_ID: ${{ secrets.ANTHROPIC_WORKSPACE_ID }}
+          DISABLE_AUTOUPDATER: "1"
+        run: |
+          set -euo pipefail
+          umask 077
+          work="$RUNNER_TEMP/review"
+          wif="$RUNNER_TEMP/claude-wif"
+          mkdir -p "$wif/config/configs"
+
+          # 空の変数も「指定あり」として扱われるので、secret が空なら消しておく。
+          # ルールのワークスペースが 1 つなら、送らなくてもサーバーが選ぶ。
+          [ -n "${ANTHROPIC_WORKSPACE_ID:-}" ] || unset ANTHROPIC_WORKSPACE_ID
+
+          export ANTHROPIC_IDENTITY_TOKEN_FILE="$wif/identity-token"
+          fetch_identity_token() {
+            local token
+            token=$(curl -fsS --retry 3 \
+              -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" \
+              | jq -er .value) || return 1
+            echo "::add-mask::${token}"
+            # 読みかけのファイルを Claude Code に掴ませないよう、書いてから差し替える
+            printf '%s' "$token" > "$ANTHROPIC_IDENTITY_TOKEN_FILE.tmp"
+            mv "$ANTHROPIC_IDENTITY_TOKEN_FILE.tmp" "$ANTHROPIC_IDENTITY_TOKEN_FILE"
+          }
+          fetch_identity_token
+
+          # フェデレーションをプロファイル経由にすると、交換したアクセストークンが
+          # ディスクにキャッシュされ、Claude Code の子プロセスとも共有される。GitHub の
+          # OIDC トークンは 1 回しか交換できない（jti）ので、プロセスごとに交換し直すと
+          # 2 回目が jti_reused で拒否される。中身はこれだけでよく、残りの項目は
+          # 上の ANTHROPIC_* から補われる。
+          export ANTHROPIC_CONFIG_DIR="$wif/config" ANTHROPIC_PROFILE=default
+          echo '{"version":"1.0","authentication":{"type":"oidc_federation"}}' \
+            > "$ANTHROPIC_CONFIG_DIR/configs/default.json"
+
+          # GitHub の OIDC トークンは 5 分で切れ、交換で得るアクセストークンの寿命も
+          # その残り時間の 2 倍までに縛られる。Claude Code は更新のたびにファイルを
+          # 読み直すので、長いレビューの間もファイルを新しく保つ。アクションは 4 分
+          # おきだが、それだと残り 1 分のトークンを交換して寿命 2 分のアクセストークンに
+          # なることがあるので、1 分おきにする。
+          ( while sleep 60 </dev/null >/dev/null 2>&1; do
+              fetch_identity_token || echo "::warning::GitHub の OIDC トークンを更新できなかった。"
+            done ) &
+          refresher=$!
+          # キャッシュされたアクセストークンも $wif の下にあるので、まとめて消す
+          trap 'kill "$refresher" 2>/dev/null || true; rm -rf "$wif"' EXIT
+
+          # --allowedTools は値を複数取るので最後に置く。後ろに引数があると飲み込まれる。
+          status=0
+          env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            claude -p \
+              --model "$REVIEW_MODEL" \
+              --json-schema "$(jq -c . .github/scripts/verdict-schema.json)" \
+              --setting-sources user \
+              --no-session-persistence \
+              --output-format stream-json --verbose \
+              --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh api:*),Bash(gh release view:*),Bash(npm view:*),WebFetch" \
+              < "$work/prompt.txt" > "$work/output.jsonl" || status=$?
+
+          jq -c 'select(.type == "result")
+                 | {subtype, is_error, duration_ms, num_turns, total_cost_usd}' \
+            "$work/output.jsonl" || true
+          exit "$status"
 
       - name: 評決を取り出す
         # レビューが落ちた回も ERROR の評決を書いて成果物に残す
         if: ${{ !cancelled() }}
         env:
           PR_NUMBER: ${{ matrix.pr }}
-          REVIEW_OUTCOME: ${{ steps.review.outcome }}
-          STRUCTURED_OUTPUT: ${{ steps.review.outputs.structured_output }}
-          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
         run: |
           set -euo pipefail
           mkdir -p verdicts
@@ -224,27 +294,31 @@ jobs:
           echo "::stop-commands::${STOP}"
 
           # 評決が取れなかったときは ERROR にする。ERROR は「調べていない」であって
-          # 「問題なし」ではないので、apply ジョブはその PR に触れない。構造化出力が
-          # 取れなかった回は Action 自体が失敗するので、成否はステップの outcome で見て、
-          # 失敗した回の出力は使わない。
-          python3 - "$PR_NUMBER" "verdicts/${PR_NUMBER}.json" <<'PY'
-          import json, os, sys
+          # 「問題なし」ではないので、apply ジョブはその PR に触れない。評決として使うのは
+          # Claude Code が JSON Schema に沿って返した構造化出力だけで、本文は読まない。
+          python3 - "$PR_NUMBER" "verdicts/${PR_NUMBER}.json" "$RUNNER_TEMP/review/output.jsonl" <<'PY'
+          import json, sys
 
-          pr, dst = int(sys.argv[1]), sys.argv[2]
+          pr, dst, src = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 
-          # Action は失敗の理由をログに出さない（モデルが読んだものごと伏せている）。
-          # 実行記録から API エラーの種類・HTTP ステータス・CLI のエラー文だけを拾う。
+          # 出力は 1 行 1 メッセージの JSON（stream-json）。最後の result が実行の結果。
+          messages = []
+          try:
+              with open(src, encoding="utf-8") as f:
+                  for line in f:
+                      try:
+                          m = json.loads(line)
+                      except ValueError:
+                          continue
+                      if isinstance(m, dict):
+                          messages.append(m)
+          except OSError:
+              pass
+          result = next((m for m in reversed(messages) if m.get("type") == "result"), {})
+
+          # 失敗の理由は API エラーの種類・HTTP ステータス・CLI のエラー文だけを拾う。
           # 認証や課金で落ちた回に、Console を見る前から原因の見当がつく。
           def failure_detail():
-              try:
-                  with open(os.environ.get("EXECUTION_FILE", ""), encoding="utf-8") as f:
-                      messages = json.load(f)
-              except (OSError, ValueError):
-                  return ""
-              if not isinstance(messages, list):
-                  return ""
-              messages = [m for m in messages if isinstance(m, dict)]
-              result = next((m for m in reversed(messages) if m.get("type") == "result"), {})
               kinds = [str(m["error"]) for m in messages
                        if m.get("type") == "assistant" and m.get("error")]
               status = result.get("api_error_status")
@@ -256,16 +330,10 @@ jobs:
               return " ".join(" / ".join(parts).split())[:300]
 
           data = None
-          detail = ""
-          if os.environ.get("REVIEW_OUTCOME") == "success":
-              try:
-                  data = json.loads(os.environ.get("STRUCTURED_OUTPUT", ""))
-              except ValueError:
-                  data = None
-          else:
-              detail = failure_detail()
-
+          if result and not result.get("is_error"):
+              data = result.get("structured_output")
           if not isinstance(data, dict) or data.get("verdict") not in ("MERGE", "HOLD"):
+              detail = failure_detail()
               data = {
                   "verdict": "ERROR",
                   "reason": f"レビューが完了しなかった: {detail}" if detail
