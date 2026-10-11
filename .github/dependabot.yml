@@ -14,6 +14,13 @@ updates:
     # devDependencies がカタログの正本なので、Dependabot の PR がそのまま
     # カタログの更新になる。
     #
+    # そのためには PR が package.json の下限を上げなければならない。既定の auto は
+    # ライブラリと判定したプロジェクトに widen を使い、範囲内の更新では
+    # pnpm-lock.yaml しか書き換えない。8/25 に npm へ初めて publish してから、範囲内の
+    # 更新はすべてそうなっていた。レビューを通ってマージされても公開物が変わらず、
+    # 1.0.3 の後はリリースが止まっていた。
+    versioning-strategy: increase
+
     # groups は「揃えて更新しないと壊れるもの」だけをまとめる。
     # 同一バージョン系列でリリースされるもの（react と react-dom、@tanstack/* など）と、
     # peer 依存で連動するもの（xstate と @xstate/react）が対象。
