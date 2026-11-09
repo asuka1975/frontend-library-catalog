@@ -46,7 +46,7 @@
     "date-fns": "^4.4.0",
     "eslint": "^10.14.0",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "globals": "^17.13.0",
+    "globals": "^17.14.0",
     "happy-dom": "^21.0.4",
     "idb": "^8.0.4",
     "immer": "^11.2.9",
