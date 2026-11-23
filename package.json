@@ -21,7 +21,7 @@
     "@axe-core/playwright": "^4.14.0",
     "@hookform/resolvers": "^6.0.2",
     "@playwright/test": "^1.65.0",
-    "@reduxjs/toolkit": "^2.14.0",
+    "@reduxjs/toolkit": "^2.15.0",
     "@tailwindcss/vite": "^4.3.5",
     "@tanstack/query-sync-storage-persister": "^5.106.1",
     "@tanstack/react-query": "^5.106.1",
